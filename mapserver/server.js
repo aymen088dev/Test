@@ -1,0 +1,437 @@
+#!/usr/bin/env node
+"use strict";
+
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
+
+const TILE_CHUNKS = Number(process.env.MAP_TILE_CHUNKS || 8);
+const MAX_BODY = 512 * 1024;
+const APPEND_FLUSH = 200000;
+
+const SEP = "\u0000";
+
+class MapStore {
+  constructor({ dataFile = null, tileChunks = TILE_CHUNKS } = {}) {
+    this.tileChunks = Math.max(1, tileChunks);
+    this.chunks = new Map();
+    this.tiles = new Map();
+    this.dims = new Map();
+    this.dataFile = dataFile;
+    this.stream = null;
+    this.lines = 0;
+    this.appends = 0;
+
+    if (dataFile) {
+      fs.mkdirSync(path.dirname(dataFile), { recursive: true });
+      this._load();
+      this.stream = fs.createWriteStream(dataFile, { flags: "a" });
+    }
+  }
+
+  _key(dim, cx, cz) {
+    return dim + SEP + cx + SEP + cz;
+  }
+
+  _tileKey(dim, tx, tz) {
+    return dim + SEP + tx + SEP + tz;
+  }
+
+  tileOf(cx, cz) {
+    return [Math.floor(cx / this.tileChunks), Math.floor(cz / this.tileChunks)];
+  }
+
+  static valid(payload) {
+    if (!payload || typeof payload !== "object") return false;
+    if (typeof payload.dim !== "string" || !payload.dim) return false;
+    if (!Number.isInteger(payload.cx) || !Number.isInteger(payload.cz)) return false;
+    if (!Array.isArray(payload.palette) || !Array.isArray(payload.cells)) return false;
+    if (payload.palette.length > 8192 || payload.cells.length > 1024) return false;
+    for (const id of payload.palette) {
+      if (typeof id !== "string") return false;
+    }
+    return true;
+  }
+
+  put(payload, { persist = true } = {}) {
+    const key = this._key(payload.dim, payload.cx, payload.cz);
+    const isNew = !this.chunks.has(key);
+    this.chunks.set(key, payload);
+
+    const [tx, tz] = this.tileOf(payload.cx, payload.cz);
+    const tk = this._tileKey(payload.dim, tx, tz);
+    let bucket = this.tiles.get(tk);
+    if (!bucket) {
+      bucket = new Set();
+      this.tiles.set(tk, bucket);
+    }
+    bucket.add(key);
+
+    let meta = this.dims.get(payload.dim);
+    if (!meta) {
+      meta = {
+        count: 0,
+        min_cx: payload.cx,
+        max_cx: payload.cx,
+        min_cz: payload.cz,
+        max_cz: payload.cz,
+        y_min: 9999,
+        y_max: -9999,
+      };
+      this.dims.set(payload.dim, meta);
+    }
+    if (isNew) meta.count += 1;
+    meta.min_cx = Math.min(meta.min_cx, payload.cx);
+    meta.max_cx = Math.max(meta.max_cx, payload.cx);
+    meta.min_cz = Math.min(meta.min_cz, payload.cz);
+    meta.max_cz = Math.max(meta.max_cz, payload.cz);
+
+    const cells = payload.cells;
+    for (let i = 0; i < cells.length; i++) {
+      const cell = cells[i];
+      if (!Array.isArray(cell)) continue;
+      for (let j = 0; j < cell.length; j += 2) {
+        const y = cell[j];
+        if (typeof y === "number") {
+          if (y < meta.y_min) meta.y_min = y;
+          if (y > meta.y_max) meta.y_max = y;
+        }
+      }
+    }
+
+    if (persist && this.stream) {
+      this.stream.write(JSON.stringify(payload) + "\n");
+      this.appends += 1;
+      if (this.appends >= APPEND_FLUSH) this.compact();
+    }
+    return isNew;
+  }
+
+  get(dim, cx, cz) {
+    return this.chunks.get(this._key(dim, cx, cz)) || null;
+  }
+
+  tile(dim, tx, tz) {
+    const bucket = this.tiles.get(this._tileKey(dim, tx, tz));
+    if (!bucket) return [];
+    const out = [];
+    for (const key of bucket) out.push(this.chunks.get(key));
+    return out.filter(Boolean);
+  }
+
+  range(dim, cx0, cz0, cx1, cz1) {
+    const out = [];
+    for (const payload of this.chunks.values()) {
+      if (payload.dim !== dim) continue;
+      if (payload.cx < cx0 || payload.cx > cx1) continue;
+      if (payload.cz < cz0 || payload.cz > cz1) continue;
+      out.push(payload);
+      if (out.length >= 4096) break;
+    }
+    return out;
+  }
+
+  stats() {
+    return {
+      chunks: this.chunks.size,
+      tiles: this.tiles.size,
+      dimensions: Array.from(this.dims.keys()),
+      persisted: Boolean(this.stream),
+    };
+  }
+
+  _load() {
+    let text = "";
+    try {
+      text = fs.readFileSync(this.dataFile, "utf8");
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+      return;
+    }
+    const lines = text.split("\n");
+    let parsed = 0;
+    for (const line of lines) {
+      if (!line) continue;
+      try {
+        const payload = JSON.parse(line);
+        if (MapStore.valid(payload)) {
+          this.put(payload, { persist: false });
+          parsed += 1;
+        }
+      } catch {
+        /* ligne corrompue : ignoree */
+      }
+    }
+    this.lines = parsed;
+    if (parsed > this.chunks.size * 1.5 + 1000) this.compact();
+  }
+
+  compact() {
+    if (!this.dataFile) return;
+    this.appends = 0;
+    const tmp = this.dataFile + ".tmp";
+    const out = fs.createWriteStream(tmp, { flags: "w" });
+    for (const payload of this.chunks.values()) {
+      out.write(JSON.stringify(payload) + "\n");
+    }
+    out.end();
+    out.on("close", () => {
+      try {
+        if (this.stream) this.stream.close();
+        fs.renameSync(tmp, this.dataFile);
+        this.stream = fs.createWriteStream(this.dataFile, { flags: "a" });
+      } catch (err) {
+        console.error("[map] compactage impossible :", err.message);
+      }
+    });
+  }
+
+  async close() {
+    if (!this.stream) return;
+    await new Promise((resolve) => {
+      this.stream.end(resolve);
+    });
+    this.stream = null;
+  }
+}
+
+const MIME = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".txt": "text/plain; charset=utf-8",
+};
+
+const PUBLIC_DIR = path.join(__dirname, "public");
+
+function sendJson(res, code, obj) {
+  const body = JSON.stringify(obj);
+  res.writeHead(code, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body),
+    "Cache-Control": "no-store",
+    "Access-Control-Allow-Origin": "*",
+  });
+  res.end(body);
+}
+
+function applyCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Api-Key");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+}
+
+function readBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const parts = [];
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > limit) {
+        reject(new Error("payload trop volumineux"));
+        req.destroy();
+        return;
+      }
+      parts.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(parts)));
+    req.on("error", reject);
+  });
+}
+
+function serveStatic(res, publicDir, pathname) {
+  const root = path.resolve(publicDir);
+  const rel = pathname === "/" ? "/index.html" : pathname;
+  const full = path.resolve(root, "." + (rel.startsWith("/") ? rel : "/" + rel));
+  if (full !== root && !full.startsWith(root + path.sep)) {
+    sendJson(res, 403, { error: "acces refuse" });
+    return;
+  }
+  fs.readFile(full, (err, buf) => {
+    if (err) {
+      sendJson(res, 404, { error: "introuvable" });
+      return;
+    }
+    const type = MIME[path.extname(full).toLowerCase()] || "application/octet-stream";
+    res.writeHead(200, {
+      "Content-Type": type,
+      "Content-Length": buf.length,
+      "Cache-Control": "no-cache",
+    });
+    res.end(buf);
+  });
+}
+
+function handleChunkPost(req, res, store, apiKey) {
+  if (apiKey) {
+    const given = req.headers["x-api-key"];
+    if (given !== apiKey) {
+      req.resume();
+      sendJson(res, 401, { error: "cle d'API invalide" });
+      return;
+    }
+  }
+  readBody(req, MAX_BODY)
+    .then((buf) => {
+      let payload;
+      try {
+        payload = JSON.parse(buf.toString("utf8"));
+      } catch {
+        sendJson(res, 400, { error: "JSON invalide" });
+        return;
+      }
+      if (!MapStore.valid(payload)) {
+        sendJson(res, 422, { error: "payload invalide" });
+        return;
+      }
+      const isNew = store.put(payload);
+      sendJson(res, 200, { ok: true, chunk: [payload.cx, payload.cz], new: isNew });
+    })
+    .catch((err) => sendJson(res, 413, { error: err.message }));
+}
+
+function createApp(options = {}) {
+  const store = options.store || new MapStore(options);
+  const apiKey =
+    options.apiKey !== undefined ? options.apiKey : process.env.MAP_API_KEY || "";
+  const publicDir = options.publicDir || PUBLIC_DIR;
+  const startedAt = Date.now();
+
+  const server = http.createServer(async (req, res) => {
+    applyCors(res);
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    let pathname = req.url || "/";
+    try {
+      pathname = decodeURIComponent(new URL(pathname, "http://localhost").pathname);
+    } catch {
+      sendJson(res, 400, { error: "url invalide" });
+      return;
+    }
+
+    try {
+      if (pathname === "/api/chunk" && req.method === "POST") {
+        handleChunkPost(req, res, store, apiKey);
+        return;
+      }
+
+      if (req.method !== "GET") {
+        sendJson(res, 405, { error: "methode non autorisee" });
+        return;
+      }
+
+      if (pathname === "/api/status") {
+        sendJson(res, 200, {
+          ok: true,
+          tile_size: store.tileChunks,
+          uptime_seconds: Math.round((Date.now() - startedAt) / 1000),
+          ...store.stats(),
+        });
+        return;
+      }
+
+      if (pathname === "/api/meta") {
+        const dim = new URL(req.url, "http://localhost").searchParams.get("dim");
+        const meta = dim ? store.dims.get(dim) : null;
+        if (!meta) {
+          sendJson(res, 404, { error: "dimension inconnue", dim: dim });
+          return;
+        }
+        sendJson(res, 200, { dim: dim, ...meta });
+        return;
+      }
+
+      const parts = pathname.split("/").filter(Boolean);
+      if (parts[0] === "api" && parts[1] === "tile" && parts.length === 5) {
+        const [, , dim, tx, tz] = parts;
+        sendJson(res, 200, {
+          dim: dim,
+          tx: Number(tx),
+          tz: Number(tz),
+          chunks: store.tile(dim, Number(tx), Number(tz)),
+        });
+        return;
+      }
+
+      if (parts[0] === "api" && parts[1] === "chunk" && parts.length === 5) {
+        const [, , dim, cx, cz] = parts;
+        const payload = store.get(dim, Number(cx), Number(cz));
+        if (!payload) {
+          sendJson(res, 404, { error: "chunk introuvable" });
+          return;
+        }
+        sendJson(res, 200, payload);
+        return;
+      }
+
+      if (pathname === "/api/chunks") {
+        const params = new URL(req.url, "http://localhost").searchParams;
+        const dim = params.get("dim");
+        const cx0 = Number(params.get("cx0"));
+        const cz0 = Number(params.get("cz0"));
+        const cx1 = Number(params.get("cx1"));
+        const cz1 = Number(params.get("cz1"));
+        if (!dim || ![cx0, cz0, cx1, cz1].every(Number.isFinite)) {
+          sendJson(res, 400, { error: "parametres dim/cx0/cz0/cx1/cz1 manquants" });
+          return;
+        }
+        sendJson(res, 200, {
+          dim: dim,
+          chunks: store.range(dim, cx0, cz0, cx1, cz1),
+        });
+        return;
+      }
+
+      if (req.method === "GET") {
+        serveStatic(res, publicDir, pathname);
+        return;
+      }
+
+      sendJson(res, 405, { error: "methode non autorisee" });
+    } catch (err) {
+      sendJson(res, 500, { error: String((err && err.message) || err) });
+    }
+  });
+
+  return { server: server, store: store };
+}
+
+function main() {
+  const port = Number(process.env.PORT || process.env.MAP_PORT || 10015);
+  const host = process.env.HOST || "0.0.0.0";
+  const dataFile =
+    process.env.MAP_DATA_FILE || path.join(__dirname, "data", "chunks.ndjson");
+  const apiKey = process.env.MAP_API_KEY || "";
+
+  const app = createApp({ dataFile: dataFile, apiKey: apiKey });
+
+  app.server.listen(port, host, () => {
+    console.log(`[map] carte dispo sur http://${host}:${port}/`);
+    console.log(`[map] donnees : ${dataFile}`);
+    console.log(`[map] auth ecriture : ${apiKey ? "activee" : "desactivee"}`);
+    console.log(`[map] chunks en memoire : ${app.store.chunks.size}`);
+  });
+
+  const shutdown = (signal) => {
+    console.log(`[map] ${signal} -> arret propre`);
+    app.server.close(() => {});
+    app.store.close().then(() => process.exit(0));
+    setTimeout(() => process.exit(0), 3000).unref();
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+}
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = { MapStore, TILE_CHUNKS, MAX_BODY, createApp };

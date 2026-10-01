@@ -1,0 +1,45 @@
+# ------------------------------------------------------------------
+# URL de base de ton serveur Node.js (la carte)
+# ------------------------------------------------------------------
+endpoint = "http://151.240.30.8:10015"
+
+# Cle d'API partagee : elle doit etre IDENTIQUE a MAP_API_KEY sur le
+# serveur Node.js. Vide = aucune authentification.
+api_key = "change-me"
+
+# ------------------------------------------------------------------
+# Zone a scanner
+# ------------------------------------------------------------------
+# Centre du scan en blocs. Laisse a 0,0 pour utiliser le spawn.
+center_x = 0
+center_z = 0
+
+# Rayon du scan en CHUNKS autour du centre.
+#   32  -> ~1 000 blocs de rayon   (rapide)
+#   64  -> ~2 000 blocs de rayon
+#  128  -> ~4 000 blocs de rayon   (lent, beaucoup de donnees)
+radius_chunks = 32
+
+# Dimensions a scanner : "overworld", "nether", "the_end"
+dimensions = ["overworld"]
+
+# ------------------------------------------------------------------
+# Performances
+# ------------------------------------------------------------------
+# Blocs solides conserves par colonne.
+#   1 = simple heightmap (colonne pleine couleur)
+#   4 = + parois colorees (cote des falaises / BlueMap)
+depth = 4
+
+# Chunks traites par TICK (20 ticks = 1 seconde).
+# Baisse si le serveur rame pendant le scan.
+chunks_per_tick = 2
+
+# Pause (ms) entre deux envois HTTP (evite de saturer le reseau)
+send_delay_ms = 50
+
+# Lancer un scan automatiquement au demarrage
+auto_scan = true
+
+# Arreter le scan si plus aucun joueur n'est connecte
+stop_when_empty = false

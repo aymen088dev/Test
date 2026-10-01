@@ -2,3 +2,11 @@
 serveur/endstone/
 # Dossier serveur Endstone isole (binaire BDS, mondes, plugins, venv...)
 serveur/data/
+# Python
+__pycache__/
+*.pyc
+
+# Carte : donnees runtime + deps Node
+mapserver/data/
+mapserver/node_modules/
+plugin-worldmap/_tmp_data.ndjson

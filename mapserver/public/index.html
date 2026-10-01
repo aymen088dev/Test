@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+    <title>Carte du serveur</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <div class="brand">
+        <span class="logo">◆</span>
+        <div>
+          <h1>Carte du serveur</h1>
+          <p class="sub"><span id="dim-label">overworld</span> · <span id="chunk-count">0</span> chunks</p>
+        </div>
+      </div>
+
+      <div class="tools">
+        <select id="dim-select" aria-label="Dimension"></select>
+        <div class="zoom">
+          <button id="zoom-out" type="button" title="Dézoomer">−</button>
+          <button id="zoom-reset" type="button" title="Recentrer">◎</button>
+          <button id="zoom-in" type="button" title="Zoomer">+</button>
+        </div>
+        <div class="pill" id="live">
+          <span class="dot"></span>
+          <span id="live-label">connexion…</span>
+        </div>
+      </div>
+    </header>
+
+    <main id="stage">
+      <canvas id="map"></canvas>
+      <div class="hint" id="hint">Glisser pour déplacer · molette pour zoomer</div>
+      <div class="loader" id="loader"><span></span><b>chargement…</b></div>
+    </main>
+
+    <script src="blocks.js"></script>
+    <script src="map.js"></script>
+  </body>
+</html>
