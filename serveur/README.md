@@ -2,10 +2,21 @@
 
 Contient l'installeur Endstone lancé par le wrapper `../bedrock_server`.
 
-- `start.sh` : installe Python 3 s'il manque, crée un venv (`serveur/.venv`),
-  installe/maj Endstone, puis lance le serveur.
-- `.venv/` : environnement Python persistant (créé automatiquement).
-- `plugins/` : dépose ici tes plugins Endstone au format `.whl`, puis redémarre.
+## Ce qu'il y a ici
+
+- `start.sh` : installeur + launcher. Il télécharge le **bundle officiel**
+  `endstone-<version>-linux-x86_64.zip` depuis
+  `github.com/EndstoneMC/endstone/releases`, l'extrait dans `endstone/`,
+  puis lance le `start.sh` officiel du bundle.
+- `server.properties` : modèle copié à la racine du serveur s'il n'existe pas
+  (pour que Pterodactyl puisse y injecter le port alloué).
+- `endstone/` : bundle officiel téléchargé (créé automatiquement, non versionné).
+
+## Pas besoin de Python système
+
+Le bundle officiel embarque **uv**, qui télécharge et gère lui-même un
+interpréteur Python (python-build-standalone) dans son propre `.venv`.
+Le script ne vérifie donc pas et n'installe pas de `python3` système.
 
 ## Utilisation sur Pterodactyl
 
@@ -15,4 +26,13 @@ Contient l'installeur Endstone lancé par le wrapper `../bedrock_server`.
 4. `chmod +x bedrock_server` (via SFTP — le gestionnaire web ne pose pas le +x).
 5. Démarre. La commande fixe `./bedrock_server` lance Endstone.
 
-Variable optionnelle : `ENDSTONE_VERSION` (ex. `0.11.5`) pour épingler une version.
+Plugins Endstone : dépose tes `.whl` dans le dossier `plugins/` à la racine, puis
+redémarre.
+
+## Version
+
+- Par défaut : la **dernière release** officielle à chaque (re)démarrage.
+- Épingler une version : définis la variable d'environnement `ENDSTONE_VERSION`
+  (ex. `0.11.12`).
+
+Pour forcer une mise à jour de version, supprime le dossier `serveur/endstone/`.

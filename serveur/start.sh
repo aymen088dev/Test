@@ -1,69 +1,120 @@
 #!/bin/sh
 # ---------------------------------------------------------------------------
-# serveur/start.sh  ==  installeur + lanceur Endstone
+# serveur/start.sh  ==  installeur + launcher ENDSTONE (bundle officiel)
 #
-# 1. Verifie / installe Python 3 (apt, apk ou dnf) s'il est absent.
-# 2. Cree un environnement virtuel persistant (serveur/.venv).
-# 3. Installe ou met a jour Endstone (variable ENDSTONE_VERSION optionnelle).
-# 4. Lance Endstone sur la racine du serveur.
+# Aucune verification de Python : le bundle officiel embarque "uv", qui
+# installe lui-meme un Python gere (python-build-standalone). Il n'y a donc
+# PAS besoin d'un python3 systeme dans le conteneur.
 #
-# Ce fichier est lance par le wrapper ../bedrock_server. Pour le rendre
-# appelable directement : chmod +x serveur/start.sh
+# Ce script :
+#   1. determine la version (ENDSTONE_VERSION, sinon la derniere release),
+#   2. telecharge le bundle officiel endstone-<ver>-linux-x86_64.zip
+#      depuis github.com/EndstoneMC/endstone/releases (start.sh + .whl +
+#      LICENSE + CHANGELOG = tout ce qu'il faut),
+#   3. l'extrait dans serveur/endstone/,
+#   4. cree un server.properties a la racine s'il manque (pour le panel),
+#   5. lance le start.sh officiel du bundle avec  -s <racine> -y
+#      (le dossier serveur reste la racine, donc server.properties/worlds/
+#       plugins restent la ou Pterodactyl les attend).
+#
+# Variable optionnelle : ENDSTONE_VERSION (ex. 0.11.12) pour epingler.
 # ---------------------------------------------------------------------------
+
+set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 cd "$ROOT" || exit 1
 
-echo "[endstone] Dossier serveur : $ROOT"
+REPO="EndstoneMC/endstone"
+DEST="$HERE/endstone"
 
-# --- 1) Python 3 present ? sinon on l'installe ---------------------------
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "[endstone] python3 absent : demande d'installation..."
-    if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -y && apt-get install -y python3 python3-pip python3-venv
-    elif command -v apk >/dev/null 2>&1; then
-        apk add --no-cache python3 py3-pip
-    elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y python3 python3-pip
-    else
-        echo "[endstone] ERREUR : aucun gestionnaire de paquets (apt/apk/dnf)." >&2
-        echo "[endstone] Impossible d'installer python3 depuis ce conteneur." >&2
-        exit 1
-    fi
-fi
+echo "[endstone] Racine serveur : $ROOT"
 
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "[endstone] ERREUR : python3 toujours introuvable apres installation." >&2
+# --- Outil de telechargement --------------------------------------------
+if command -v curl >/dev/null 2>&1; then
+    DL="curl"
+elif command -v wget >/dev/null 2>&1; then
+    DL="wget"
+else
+    echo "[endstone] ERREUR : ni curl ni wget disponibles." >&2
     exit 1
 fi
 
-PYVER="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)"
-echo "[endstone] Python $PYVER detecte."
-
-# --- 2) Environnement virtuel persistant ---------------------------------
-VENV="$HERE/.venv"
-if [ ! -x "$VENV/bin/python" ]; then
-    echo "[endstone] Creation de l'environnement virtuel ($VENV)..."
-    if ! python3 -m venv "$VENV"; then
-        if command -v apt-get >/dev/null 2>&1; then
-            apt-get install -y python3-venv
-        fi
-        python3 -m venv "$VENV" || { echo "[endstone] ERREUR : venv impossible." >&2; exit 1; }
-    fi
-fi
-
-# --- 3) Installation / mise a jour d'Endstone ----------------------------
-if [ -n "$ENDSTONE_VERSION" ]; then
-    PKG="endstone==$ENDSTONE_VERSION"
+# --- 1) Version ----------------------------------------------------------
+if [ -n "${ENDSTONE_VERSION:-}" ]; then
+    VER="${ENDSTONE_VERSION#v}"
+    echo "[endstone] Version epinglee : $VER"
 else
-    PKG="endstone"
+    if [ "$DL" = "curl" ]; then
+        VER="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+            "https://github.com/$REPO/releases/latest" 2>/dev/null \
+            | sed -n 's#.*/tag/v\{0,1\}##p')"
+    else
+        VER="$(wget -qO- "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
+            | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n 1)"
+    fi
+    if [ -z "$VER" ]; then
+        echo "[endstone] ERREUR : impossible de determiner la derniere version." >&2
+        exit 1
+    fi
+    echo "[endstone] Derniere version : $VER"
 fi
-echo "[endstone] Installation de $PKG..."
-"$VENV/bin/python" -m pip install -q -U pip
-"$VENV/bin/python" -m pip install -q -U --no-warn-script-location "$PKG"
 
-# --- 4) Lancement --------------------------------------------------------
-mkdir -p plugins
-echo "[endstone] Demarrage du serveur Endstone..."
-exec "$VENV/bin/python" -m endstone -s "$ROOT" -y
+BUNDLE="endstone-${VER}-linux-x86_64"
+URL="https://github.com/$REPO/releases/download/v${VER}/${BUNDLE}.zip"
+BUNDLE_DIR="$DEST/$BUNDLE"
+BUNDLE_START="$BUNDLE_DIR/start.sh"
+
+# --- 2) Telechargement du bundle officiel -------------------------------
+if [ ! -f "$BUNDLE_START" ]; then
+    mkdir -p "$DEST"
+    echo "[endstone] Telechargement : $URL"
+    if [ "$DL" = "curl" ]; then
+        curl -fL --retry 3 -o "$DEST/$BUNDLE.zip" "$URL" \
+            || { echo "[endstone] ERREUR : telechargement echoue (version inexistante ?)." >&2; exit 1; }
+    else
+        wget -O "$DEST/$BUNDLE.zip" "$URL" \
+            || { echo "[endstone] ERREUR : telechargement echoue (version inexistante ?)." >&2; exit 1; }
+    fi
+
+    # --- 3) Extraction (plusieurs extracteurs en secours) ---------------
+    echo "[endstone] Extraction..."
+    if command -v unzip >/dev/null 2>&1; then
+        unzip -q -o "$DEST/$BUNDLE.zip" -d "$DEST"
+    elif command -v bsdtar >/dev/null 2>&1; then
+        bsdtar -xf "$DEST/$BUNDLE.zip" -C "$DEST"
+    elif command -v busybox >/dev/null 2>&1; then
+        busybox unzip -o "$DEST/$BUNDLE.zip" -d "$DEST"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -m zipfile -e "$DEST/$BUNDLE.zip" "$DEST"
+    else
+        echo "[endstone] ERREUR : aucun extracteur zip (unzip/bsdtar/busybox/python3)." >&2
+        exit 1
+    fi
+    rm -f "$DEST/$BUNDLE.zip"
+
+    if [ ! -f "$BUNDLE_START" ]; then
+        echo "[endstone] ERREUR : $BUNDLE_START introuvable apres extraction." >&2
+        exit 1
+    fi
+    echo "[endstone] Bundle installe : $BUNDLE_DIR"
+else
+    echo "[endstone] Bundle deja present : $BUNDLE_DIR"
+fi
+
+# --- 4) server.properties par defaut a la racine ------------------------
+if [ ! -f "$ROOT/server.properties" ] && [ -f "$HERE/server.properties" ]; then
+    echo "[endstone] Creation de server.properties a la racine."
+    cp "$HERE/server.properties" "$ROOT/server.properties"
+fi
+mkdir -p "$ROOT/plugins"
+
+# --- 5) Lancement via le start.sh OFFICIEL du bundle --------------------
+if command -v bash >/dev/null 2>&1; then
+    SH="bash"
+else
+    SH="sh"
+fi
+echo "[endstone] Demarrage : $SH $BUNDLE_START -s $ROOT -y"
+exec "$SH" "$BUNDLE_START" -s "$ROOT" -y
