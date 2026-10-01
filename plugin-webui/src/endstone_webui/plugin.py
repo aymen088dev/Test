@@ -5,8 +5,6 @@ Le plugin ouvre donc un *menu natif* en jeu, et peut aussi donner au joueur un
 lien vers un vrai dashboard HTML/CSS/JS servi par le serveur web interne.
 """
 
-from __future__ import annotations
-
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional

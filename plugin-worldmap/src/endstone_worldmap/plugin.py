@@ -9,8 +9,6 @@ Le scan tourne sur le thread principal du serveur (contrainte de l'API
 Endstone) ; l'envoi HTTP part dans un thread a part entiere.
 """
 
-from __future__ import annotations
-
 from collections import deque
 from typing import Any, Deque, Optional, Tuple
 
@@ -74,6 +72,7 @@ class WorldMapPlugin(Plugin):
     _total = 0
     _processed = 0
     _errors = 0
+    _logged = 0
 
     # --- cycle de vie ----------------------------------------------------
 
@@ -81,6 +80,7 @@ class WorldMapPlugin(Plugin):
     def on_enable(self) -> None:
         # Copie config.toml dans le dossier du plugin au premier demarrage.
         self.save_default_config()
+        self.logger.info(f"Configuration : {self.data_folder / 'config.toml'}")
 
         self._queue = deque()
         self._dims = {}
@@ -88,6 +88,7 @@ class WorldMapPlugin(Plugin):
         self._total = 0
         self._processed = 0
         self._errors = 0
+        self._logged = 0
 
         self._sender = MapSender(
             endpoint=self._cfg_str("endpoint", ""),
@@ -222,6 +223,7 @@ class WorldMapPlugin(Plugin):
         self._total = len(queue)
         self._processed = 0
         self._errors = 0
+        self._logged = 0
         self._scanning = True
 
         # On purge un eventuel scan precedent en planifiant une seule tache.
@@ -259,8 +261,11 @@ class WorldMapPlugin(Plugin):
 
         if not self._queue:
             self._scanning = False
+            stats = self._sender.stats() if self._sender else {}
             self.logger.info(
-                f"Scan termine : {self._processed} chunks envoyes."
+                f"Scan termine : {self._processed} chunks | "
+                f"envoyes {stats.get('sent', 0)} | echecs {stats.get('failed', 0)} | "
+                f"erreur {stats.get('last_error') or '-'}"
             )
             return
 
@@ -290,6 +295,18 @@ class WorldMapPlugin(Plugin):
             self._processed += 1
             if payload is not None and self._sender is not None:
                 self._sender.submit(payload)
+
+        # Trace de progression : permet de voir si les envois partent vraiment.
+        if self._processed - self._logged >= 250:
+            self._logged = self._processed
+            stats = self._sender.stats() if self._sender else {}
+            self.logger.info(
+                f"Scan {self._processed}/{self._total} | "
+                f"envoyes {stats.get('sent', 0)} | "
+                f"echecs {stats.get('failed', 0)} | "
+                f"file {stats.get('queued', 0)} | "
+                f"erreur {stats.get('last_error') or '-'}"
+            )
 
         self._schedule_next(delay=1)
 
