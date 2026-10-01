@@ -1,0 +1,12 @@
+# Adresse d'ecoute du serveur web interne.
+# 0.0.0.0 = accessible depuis l'exterieur du conteneur (si le port est alloue).
+web_host = "0.0.0.0"
+
+# Port du serveur web.
+# IMPORTANT (Pterodactyl) : doit etre un port ALLOUE dans le panel du serveur.
+web_port = 8090
+
+# URL publique affichee aux joueurs dans le chat.
+# Laisse vide pour utiliser le placeholder http://<IP_DU_SERVEUR>:<web_port>/
+# Exemple : "http://123.45.67.89:8090" ou un domaine reverse-proxy "https://mon-serveur.fr"
+public_url = ""

@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tableau de bord — Serveur</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="glow"></div>
+
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">⛏</span>
+        <div>
+          <h1 id="server-name">Serveur</h1>
+          <p class="sub">
+            <span id="software">Endstone</span> · MC <span id="mc-version">—</span>
+          </p>
+        </div>
+      </div>
+      <div class="status">
+        <span class="dot" id="live-dot"></span>
+        <span id="live-label">Connexion…</span>
+        <span class="sep">•</span>
+        <span id="updated">—</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="cards">
+        <article class="card">
+          <p class="card-label">Joueurs en ligne</p>
+          <p class="card-value">
+            <span id="players-online">—</span>
+            <span class="card-sub">/ <span id="max-players">—</span></span>
+          </p>
+        </article>
+        <article class="card">
+          <p class="card-label">TPS</p>
+          <p class="card-value"><span id="tps">—</span></p>
+        </article>
+        <article class="card">
+          <p class="card-label">MSPT</p>
+          <p class="card-value"><span id="mspt">—</span></p>
+        </article>
+        <article class="card">
+          <p class="card-label">Uptime</p>
+          <p class="card-value"><span id="uptime">—</span></p>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Joueurs connectés</h2>
+          <span class="badge" id="players-badge">0</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Joueur</th>
+                <th>Ping</th>
+                <th>Appareil</th>
+                <th>Mode</th>
+              </tr>
+            </thead>
+            <tbody id="players-body">
+              <tr class="empty"><td colspan="4">Aucun joueur connecté.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span>Interface web du serveur — générée par le plugin <code>webui</code></span>
+      <button id="refresh" type="button">Rafraîchir</button>
+    </footer>
+
+    <script src="app.js"></script>
+  </body>
+</html>
