@@ -1,2 +1,4 @@
 # Bundle Endstone telecharge au runtime (start.sh + .whl)
 serveur/endstone/
+# Dossier serveur Endstone isole (binaire BDS, mondes, plugins, venv...)
+serveur/data/

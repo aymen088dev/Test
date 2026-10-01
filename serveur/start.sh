@@ -10,12 +10,20 @@
 #   1. determine la version (ENDSTONE_VERSION, sinon la derniere release),
 #   2. telecharge le bundle officiel endstone-<ver>-linux-x86_64.zip
 #      depuis github.com/EndstoneMC/endstone/releases (start.sh + .whl +
-#      LICENSE + CHANGELOG = tout ce qu'il faut),
+#      LICENSE + CHANGELOG),
 #   3. l'extrait dans serveur/endstone/,
-#   4. cree un server.properties a la racine s'il manque (pour le panel),
-#   5. lance le start.sh officiel du bundle avec  -s <racine> -y
-#      (le dossier serveur reste la racine, donc server.properties/worlds/
-#       plugins restent la ou Pterodactyl les attend).
+#   4. prepare le dossier serveur Endstone ISOLE : serveur/data/
+#   5. lance le start.sh officiel du bundle avec  -s <serveur/data> -y
+#
+# ---------------------------------------------------------------------------
+# POURQUOI serveur/data/ ET PAS LA RACINE
+# Endstone deploie le binaire Bedrock Dedicated Server dans son "server
+# folder", sous le nom EXACT "bedrock_server" (voir executable_filename dans
+# endstone/cli/base.py), et il ecrase toujours ce fichier. Si on lui donnait
+# la racine du serveur, il remplacait notre wrapper ./bedrock_server par le
+# binaire BDS. On isole donc Endstone dans serveur/data/, et le wrapper de la
+# racine est preserve.
+# ---------------------------------------------------------------------------
 #
 # Variable optionnelle : ENDSTONE_VERSION (ex. 0.11.12) pour epingler.
 # ---------------------------------------------------------------------------
@@ -28,8 +36,10 @@ cd "$ROOT" || exit 1
 
 REPO="EndstoneMC/endstone"
 DEST="$HERE/endstone"
+SERVER_DIR="$HERE/data"
 
-echo "[endstone] Racine serveur : $ROOT"
+echo "[endstone] Racine serveur   : $ROOT"
+echo "[endstone] Dossier Endstone : $SERVER_DIR"
 
 # --- Outil de telechargement --------------------------------------------
 if command -v curl >/dev/null 2>&1; then
@@ -103,12 +113,27 @@ else
     echo "[endstone] Bundle deja present : $BUNDLE_DIR"
 fi
 
-# --- 4) server.properties par defaut a la racine ------------------------
+# --- 4) Dossier serveur Endstone ISOLE (protege le wrapper racine) ------
+mkdir -p "$SERVER_DIR"
+
+# server.properties : le panel edite la RACINE. Endstone lit/ecrit le meme
+# fichier via un lien symbolique (il ouvre le fichier en lecture puis en
+# ecriture, donc le lien est suivi et preserve).
 if [ ! -f "$ROOT/server.properties" ] && [ -f "$HERE/server.properties" ]; then
     echo "[endstone] Creation de server.properties a la racine."
     cp "$HERE/server.properties" "$ROOT/server.properties"
 fi
-mkdir -p "$ROOT/plugins"
+if [ -f "$ROOT/server.properties" ]; then
+    ln -sfn "$ROOT/server.properties" "$SERVER_DIR/server.properties"
+else
+    echo "[endstone] ATTENTION : aucun server.properties a la racine." >&2
+fi
+
+# plugins : depose tes .whl dans plugins/ a la racine
+if [ ! -e "$ROOT/plugins" ]; then
+    ln -sfn "$SERVER_DIR/plugins" "$ROOT/plugins"
+fi
+mkdir -p "$SERVER_DIR/plugins"
 
 # --- 5) Lancement via le start.sh OFFICIEL du bundle --------------------
 if command -v bash >/dev/null 2>&1; then
@@ -116,5 +141,5 @@ if command -v bash >/dev/null 2>&1; then
 else
     SH="sh"
 fi
-echo "[endstone] Demarrage : $SH $BUNDLE_START -s $ROOT -y"
-exec "$SH" "$BUNDLE_START" -s "$ROOT" -y
+echo "[endstone] Demarrage : $SH $BUNDLE_START -s $SERVER_DIR -y"
+exec "$SH" "$BUNDLE_START" -s "$SERVER_DIR" -y
