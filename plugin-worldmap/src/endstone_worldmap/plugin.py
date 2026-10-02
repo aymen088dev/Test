@@ -92,6 +92,14 @@ class WorldMapPlugin(Plugin):
     def on_enable(self) -> None:
         # Copie config.toml dans le dossier du plugin au premier demarrage.
         self.save_default_config()
+        # Endstone met la config en cache des le chargement du plugin : sans ce
+        # rechargement, le tout premier demarrage (celui qui vient d'ecrire le
+        # config.toml) tourne encore avec une config vide -> api_key vide ->
+        # tous les envois refuses en 401. On force la relecture du fichier.
+        try:
+            self.reload_config()
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(f"Rechargement de la config impossible : {exc}")
         self.logger.info(f"Configuration : {self.data_folder / 'config.toml'}")
 
         self._queue = deque()
@@ -118,6 +126,11 @@ class WorldMapPlugin(Plugin):
             self.logger.info(
                 f"Cle d'API chargee : {len(self._sender.api_key)} caracteres"
             )
+            if not self._sender.api_key:
+                self.logger.warning(
+                    "api_key vide : si le serveur exige une cle, tous les "
+                    "envois seront refuses en HTTP 401."
+                )
 
         # Le plugin porte un @event_handler (PlayerQuitEvent) -> on l'enregistre.
         self.register_events(self)
