@@ -166,7 +166,8 @@ class WorldMapPlugin(Plugin):
         sender.send_message(
             f"{ColorFormat.GRAY}Envoyes {ColorFormat.WHITE}{stats.get('sent', 0)} "
             f"{ColorFormat.GRAY}| en file {ColorFormat.WHITE}{stats.get('queued', 0)} "
-            f"{ColorFormat.GRAY}| echecs {ColorFormat.WHITE}{stats.get('failed', 0)}"
+            f"{ColorFormat.GRAY}| echecs {ColorFormat.WHITE}{stats.get('failed', 0)} "
+            f"{ColorFormat.GRAY}| perdus {ColorFormat.WHITE}{stats.get('dropped', 0)}"
         )
         if error:
             sender.send_message(f"{ColorFormat.RED}Derniere erreur : {error}")
@@ -273,17 +274,21 @@ class WorldMapPlugin(Plugin):
         depth = self._cfg_int("depth", 4)
         done = 0
 
+        # Le budget compte CHAQUE chunk retire de la file : meme si la lecture
+        # echoue on ne traite jamais plus de `budget` chunks par tick (sinon la
+        # boucle peut vider toute la file d'un coup et figer le serveur).
         while done < budget and self._queue:
             dim_id, cx, cz = self._queue.popleft()
+            done += 1
+
             dim = self._dims.get(dim_id)
             if dim is None:
                 continue
 
             try:
-                # On ne lit que les chunks deja generes : pas de generation
-                # de monde a la volee pendant un scan.
-                if not dim.is_chunk_generated(cx, cz):
-                    continue
+                # On lit les colonnes directement : BDS charge le chunk au
+                # besoin (comme BlueMap). L'API Endstone 0.11 n'expose PAS de
+                # is_chunk_generated ; l'appeler faisait echouer chaque chunk.
                 payload = scan_chunk(dim, dim_id, cx, cz, depth)
             except Exception as exc:  # noqa: BLE001
                 self._errors += 1
@@ -291,7 +296,6 @@ class WorldMapPlugin(Plugin):
                     self.logger.warning(f"Chunk {cx},{cz} ({dim_id}) : {exc}")
                 continue
 
-            done += 1
             self._processed += 1
             if payload is not None and self._sender is not None:
                 self._sender.submit(payload)
