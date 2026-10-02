@@ -276,11 +276,12 @@ function serveStatic(res, publicDir, pathname) {
   });
 }
 
-function handleChunkPost(req, res, store, apiKey) {
+function handleChunkPost(req, res, store, apiKey, onReject) {
   if (apiKey) {
     const given = req.headers["x-api-key"];
     if (given !== apiKey) {
       req.resume();
+      if (typeof onReject === "function") onReject(given);
       sendJson(res, 401, { error: "cle d'API invalide" });
       return;
     }
@@ -312,6 +313,7 @@ function createApp(options = {}) {
       : process.env.MAP_API_KEY || API_KEY;
   const publicDir = options.publicDir || PUBLIC_DIR;
   const startedAt = Date.now();
+  let authRejected = 0;
 
   const server = http.createServer(async (req, res) => {
     applyCors(res);
@@ -331,7 +333,17 @@ function createApp(options = {}) {
 
     try {
       if (pathname === "/api/chunk" && req.method === "POST") {
-        handleChunkPost(req, res, store, apiKey);
+        handleChunkPost(req, res, store, apiKey, (given) => {
+          authRejected += 1;
+          // On ne journalise la cle recue que par sa TAILLE : ca suffit a
+          // distinguer une valeur d'une autre sans exposer de secret.
+          if (authRejected <= 3 || authRejected % 500 === 0) {
+            const len = given ? String(given).length : 0;
+            console.warn(
+              `[map] POST /api/chunk refuse (401) : cle recue ${len} caracteres`
+            );
+          }
+        });
         return;
       }
 
@@ -345,6 +357,7 @@ function createApp(options = {}) {
           ok: true,
           tile_size: store.tileChunks,
           uptime_seconds: Math.round((Date.now() - startedAt) / 1000),
+          auth_rejected: authRejected,
           ...store.stats(),
         });
         return;
