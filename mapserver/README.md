@@ -28,8 +28,16 @@ panel (ici `10015`).
 | `MAP_DATA_FILE` | `data/chunks.ndjson` | fichier de persistance |
 | `MAP_TILE_CHUNKS` | `8` | taille d'une tuile en chunks |
 
-**Mets `MAP_API_KEY`** et mets la même valeur dans `api_key` du plugin :
+**Configure la clé d'API** et mets la même valeur dans `api_key` du plugin :
 sinon n'importe qui peut écrire sur ta carte.
+
+Deux façons de la définir (la variable d'environnement reste prioritaire) :
+
+1. **En haut de `server.js`** : change la constante
+   ```js
+   const API_KEY = "change-me";   // mets ta clé ici, "" pour désactiver
+   ```
+2. **Variable d'environnement** `MAP_API_KEY` (panel, systemd, `--env-file`…).
 
 ## API
 

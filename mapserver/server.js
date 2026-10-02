@@ -5,6 +5,16 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 
+// ---------------------------------------------------------------------------
+// CONFIGURATION - modifie directement la cle ici
+// ---------------------------------------------------------------------------
+// Cle d'API exigee pour POST /api/chunk (header X-Api-Key).
+// Mets ta valeur, et la MEME valeur dans `api_key` du plugin WorldMap.
+// Chaine vide ("") = aucune authentification.
+// La variable d'environnement MAP_API_KEY reste prioritaire si definie.
+const API_KEY = "change-me";
+// ---------------------------------------------------------------------------
+
 const TILE_CHUNKS = Number(process.env.MAP_TILE_CHUNKS || 8);
 const MAX_BODY = 512 * 1024;
 const APPEND_FLUSH = 200000;
@@ -297,7 +307,9 @@ function handleChunkPost(req, res, store, apiKey) {
 function createApp(options = {}) {
   const store = options.store || new MapStore(options);
   const apiKey =
-    options.apiKey !== undefined ? options.apiKey : process.env.MAP_API_KEY || "";
+    options.apiKey !== undefined
+      ? options.apiKey
+      : process.env.MAP_API_KEY || API_KEY;
   const publicDir = options.publicDir || PUBLIC_DIR;
   const startedAt = Date.now();
 
@@ -409,7 +421,7 @@ function main() {
   const host = process.env.HOST || "0.0.0.0";
   const dataFile =
     process.env.MAP_DATA_FILE || path.join(__dirname, "data", "chunks.ndjson");
-  const apiKey = process.env.MAP_API_KEY || "";
+  const apiKey = process.env.MAP_API_KEY || API_KEY;
 
   const app = createApp({ dataFile: dataFile, apiKey: apiKey });
 
