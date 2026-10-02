@@ -23,6 +23,24 @@ from typing import Any, Optional
 
 AIR = "minecraft:air"
 
+
+def _block_id(block: Any) -> str:
+    """Identifiant d'un bloc, tolerant aux versions d'Endstone.
+
+    Endstone 0.11 expose ``Block.type`` comme une **chaine** (ex.
+    ``"minecraft:grass_block"``). Lire ``block.type.id`` levait donc une
+    AttributeError attrapee plus haut et faisait passer *chaque* colonne pour
+    de l'air : les chunks partaient vides, sans erreur visible. On accepte
+    aussi un objet BlockType (attribut ``id``) pour rester compatible.
+    """
+    try:
+        block_type = block.type
+    except Exception:  # noqa: BLE001
+        return AIR
+    if isinstance(block_type, str):
+        return block_type
+    return str(getattr(block_type, "id", block_type))
+
 # Dimension "overworld" -> identifiant complet attendu par Endstone
 DIMENSION_IDS = {
     "overworld": "minecraft:overworld",
@@ -83,11 +101,7 @@ def scan_chunk(
                 top = None
 
             if top is not None:
-                try:
-                    top_id = str(top.type.id)
-                except Exception:  # noqa: BLE001
-                    top_id = AIR
-
+                top_id = _block_id(top)
                 if top_id and top_id != AIR:
                     top_y = int(top.y)
                     cell.append(top_y)
@@ -98,9 +112,9 @@ def scan_chunk(
                         below_y = top_y - offset
                         try:
                             below = dim.get_block_at(x, below_y, z)
-                            below_id = str(below.type.id)
                         except Exception:  # noqa: BLE001
                             break
+                        below_id = _block_id(below)
                         if not below_id or below_id == AIR:
                             break
                         cell.append(below_y)

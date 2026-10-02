@@ -84,6 +84,7 @@ class WorldMapPlugin(Plugin):
     _total = 0
     _processed = 0
     _errors = 0
+    _empty = 0
     _logged = 0
 
     # --- cycle de vie ----------------------------------------------------
@@ -108,6 +109,7 @@ class WorldMapPlugin(Plugin):
         self._total = 0
         self._processed = 0
         self._errors = 0
+        self._empty = 0
         self._logged = 0
 
         self._sender = MapSender(
@@ -193,7 +195,8 @@ class WorldMapPlugin(Plugin):
         state = f"{self._processed}/{self._total}" if self._scanning else "arrete"
         sender.send_message(
             f"{ColorFormat.GRAY}Scan {ColorFormat.WHITE}{state} "
-            f"{ColorFormat.GRAY}chunks | erreurs {ColorFormat.WHITE}{self._errors}"
+            f"{ColorFormat.GRAY}chunks | erreurs {ColorFormat.WHITE}{self._errors} "
+            f"{ColorFormat.GRAY}| vides {ColorFormat.WHITE}{self._empty}"
         )
         stats = self._sender.stats() if self._sender else {}
         error = stats.get("last_error")
@@ -310,6 +313,7 @@ class WorldMapPlugin(Plugin):
         self._total = len(queue)
         self._processed = 0
         self._errors = 0
+        self._empty = 0
         self._logged = 0
         self._scanning = True
 
@@ -351,7 +355,8 @@ class WorldMapPlugin(Plugin):
             stats = self._sender.stats() if self._sender else {}
             self.logger.info(
                 f"Scan termine : {self._processed} chunks | "
-                f"envoyes {stats.get('sent', 0)} | echecs {stats.get('failed', 0)} | "
+                f"vides {self._empty} | envoyes {stats.get('sent', 0)} | "
+                f"echecs {stats.get('failed', 0)} | "
                 f"erreur {stats.get('last_error') or '-'}"
             )
             return
@@ -383,7 +388,11 @@ class WorldMapPlugin(Plugin):
                 continue
 
             self._processed += 1
-            if payload is not None and self._sender is not None:
+            if payload is None:
+                # Chunk lu mais sans aucun bloc : rien a envoyer. On le compte
+                # a part pour ne pas le confondre avec un envoi qui a marche.
+                self._empty += 1
+            elif self._sender is not None:
                 self._sender.submit(payload)
 
         # Trace de progression : permet de voir si les envois partent vraiment.

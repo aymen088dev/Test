@@ -39,15 +39,12 @@ sender_mod = load("ws_sender", SRC / "sender.py")
 # --- faux monde -------------------------------------------------------
 
 
-class FakeType:
-    def __init__(self, block_id: str) -> None:
-        self.id = block_id
-
-
 class FakeBlock:
     def __init__(self, x: int, y: int, z: int, block_id: str) -> None:
         self.x, self.y, self.z = x, y, z
-        self.type = FakeType(block_id)
+        # Endstone 0.11 : Block.type est une CHAINE, pas un objet BlockType.
+        # Le test doit refleter l'API reelle pour attraper ce genre de bug.
+        self.type = block_id
 
 
 class FakeDimension:
