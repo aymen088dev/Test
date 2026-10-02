@@ -21,7 +21,14 @@ from endstone.event import PlayerQuitEvent, event_handler
 from endstone.plugin import Plugin
 from typing_extensions import override
 
-from .scanner import build_queue, get_dimension, resolve_dimension_id, scan_chunk
+from .scanner import (
+    AIR,
+    _block_id,
+    build_queue,
+    get_dimension,
+    resolve_dimension_id,
+    scan_chunk,
+)
 from .sender import MapSender
 
 QueueItem = Tuple[str, int, int]
@@ -79,12 +86,15 @@ class WorldMapPlugin(Plugin):
 
     _queue: Deque[QueueItem] = deque()
     _dims: dict[str, Any] = {}
+    _loaded: dict[str, set] = {}
     _sender: Optional[MapSender] = None
     _scanning = False
     _total = 0
     _processed = 0
     _errors = 0
     _empty = 0
+    _non_charge = 0
+    _popped = 0
     _logged = 0
 
     # --- cycle de vie ----------------------------------------------------
@@ -110,6 +120,8 @@ class WorldMapPlugin(Plugin):
         self._processed = 0
         self._errors = 0
         self._empty = 0
+        self._non_charge = 0
+        self._popped = 0
         self._logged = 0
 
         self._sender = MapSender(
@@ -196,7 +208,8 @@ class WorldMapPlugin(Plugin):
         sender.send_message(
             f"{ColorFormat.GRAY}Scan {ColorFormat.WHITE}{state} "
             f"{ColorFormat.GRAY}chunks | erreurs {ColorFormat.WHITE}{self._errors} "
-            f"{ColorFormat.GRAY}| vides {ColorFormat.WHITE}{self._empty}"
+            f"{ColorFormat.GRAY}| vides {ColorFormat.WHITE}{self._empty} "
+            f"{ColorFormat.GRAY}| non charges {ColorFormat.WHITE}{self._non_charge}"
         )
         stats = self._sender.stats() if self._sender else {}
         error = stats.get("last_error")
@@ -261,6 +274,69 @@ class WorldMapPlugin(Plugin):
                 f"correspond pas a la cle du serveur de carte."
             )
 
+        self._probe_world(sender)
+
+    def _probe_world(self, sender: CommandSender) -> None:
+        """Diagnostique le cote monde : centre, dimension, chunks charges."""
+        level = getattr(self.server, "level", None)
+        if level is None:
+            sender.send_message(f"{ColorFormat.RED}Monde : aucun niveau charge.")
+            return
+
+        cx, cz, source = self._center(level)
+        sender.send_message(
+            f"{ColorFormat.GOLD}Monde{ColorFormat.RESET} centre "
+            f"{ColorFormat.WHITE}{cx},{cz} "
+            f"{ColorFormat.GRAY}({source})"
+        )
+
+        base_cx, base_cz = cx >> 4, cz >> 4
+        for name in self._cfg_list("dimensions", ["overworld"]):
+            dim_id = resolve_dimension_id(name)
+            dim = get_dimension(level, name)
+            if dim is None:
+                sender.send_message(
+                    f"{ColorFormat.RED}dimension introuvable : {name}"
+                )
+                continue
+
+            try:
+                loaded = list(dim.loaded_chunks or [])
+            except Exception as exc:  # noqa: BLE001
+                loaded = []
+                sender.send_message(
+                    f"{ColorFormat.RED}loaded_chunks impossible : {exc}"
+                )
+            sender.send_message(
+                f"{ColorFormat.GRAY}dim {ColorFormat.WHITE}{dim_id} "
+                f"{ColorFormat.GRAY}| nom {ColorFormat.WHITE}"
+                f"{getattr(dim, 'name', '?')} "
+                f"{ColorFormat.GRAY}| chunks charges "
+                f"{ColorFormat.WHITE}{len(loaded)}"
+            )
+
+            filled = 0
+            first = ""
+            for i in range(64):
+                bx = base_cx + (i % 8) - 4
+                bz = base_cz + (i // 8) - 4
+                try:
+                    block = dim.get_highest_block_at((bx << 4) + 8, (bz << 4) + 8)
+                except Exception as exc:  # noqa: BLE001
+                    sender.send_message(f"{ColorFormat.RED}exception : {exc}")
+                    return
+                if block is not None:
+                    bid = _block_id(block)
+                    if bid and bid != AIR:
+                        filled += 1
+                        if not first:
+                            first = f"{bid} y={block.y}"
+            sender.send_message(
+                f"{ColorFormat.GRAY}64 chunks testes -> "
+                f"{ColorFormat.WHITE}{filled} {ColorFormat.GRAY}avec blocs "
+                f"{ColorFormat.GRAY}| {first or 'aucun'}"
+            )
+
     def _cmd_stop(self, sender: CommandSender) -> None:
         if not self._scanning:
             sender.send_message(f"{ColorFormat.GRAY}Aucun scan en cours.")
@@ -302,18 +378,21 @@ class WorldMapPlugin(Plugin):
                 sender.send_error_message(f"Dimensions introuvables : {missing}")
             return
 
-        center_x, center_z = self._center(level)
+        center_x, center_z, center_src = self._center(level)
         if radius is None:
             radius = self._cfg_int("radius_chunks", 32)
 
         queue = build_queue(center_x, center_z, radius, list(dims.keys()))
 
         self._dims = dims
+        self._loaded = self._refresh_loaded()
         self._queue = deque(queue)
         self._total = len(queue)
         self._processed = 0
         self._errors = 0
         self._empty = 0
+        self._non_charge = 0
+        self._popped = 0
         self._logged = 0
         self._scanning = True
 
@@ -323,7 +402,9 @@ class WorldMapPlugin(Plugin):
         message = (
             f"{ColorFormat.GREEN}Scan lance : {ColorFormat.WHITE}{self._total} "
             f"{ColorFormat.GRAY}chunks ({ColorFormat.WHITE}rayon {radius}"
-            f"{ColorFormat.GRAY}) vers {ColorFormat.WHITE}{self._endpoint()}"
+            f"{ColorFormat.GRAY}) vers {ColorFormat.WHITE}{self._endpoint()} "
+            f"{ColorFormat.GRAY}centre {ColorFormat.WHITE}{center_x},{center_z} "
+            f"{ColorFormat.GRAY}({center_src})"
         )
         if missing:
             message += f"\n{ColorFormat.YELLOW}Dimensions ignorees : {missing}"
@@ -331,7 +412,11 @@ class WorldMapPlugin(Plugin):
             sender.send_message(message)
         self.logger.info(
             f"Scan lance : {self._total} chunks, rayon {radius}, "
-            f"dims {sorted(dims)} -> {center_x}, {center_z}"
+            f"dims {sorted(dims)} -> {center_x}, {center_z} ({center_src})"
+        )
+        charged = self._loaded.get(list(dims.keys())[0], set())
+        self.logger.info(
+            f"Chunks charges dans la zone : {len(charged)}"
         )
 
     # --- boucle de scan --------------------------------------------------
@@ -355,7 +440,8 @@ class WorldMapPlugin(Plugin):
             stats = self._sender.stats() if self._sender else {}
             self.logger.info(
                 f"Scan termine : {self._processed} chunks | "
-                f"vides {self._empty} | envoyes {stats.get('sent', 0)} | "
+                f"vides {self._empty} | non charges {self._non_charge} | "
+                f"envoyes {stats.get('sent', 0)} | "
                 f"echecs {stats.get('failed', 0)} | "
                 f"erreur {stats.get('last_error') or '-'}"
             )
@@ -371,9 +457,19 @@ class WorldMapPlugin(Plugin):
         while done < budget and self._queue:
             dim_id, cx, cz = self._queue.popleft()
             done += 1
+            self._popped += 1
+            if self._popped % 200 == 0:
+                self._loaded = self._refresh_loaded()
 
             dim = self._dims.get(dim_id)
             if dim is None:
+                continue
+
+            # Un chunk non charge ne contient aucune donnee pour BDS : on le
+            # saute plutot que de produire un chunk vide inutilement.
+            loaded = self._loaded.get(dim_id)
+            if loaded and (cx, cz) not in loaded:
+                self._non_charge += 1
                 continue
 
             try:
@@ -416,19 +512,61 @@ class WorldMapPlugin(Plugin):
             return "(non configure)"
         return self._sender.url or "(non configure)"
 
-    def _center(self, level: Any) -> Tuple[int, int]:
-        """Centre du scan : config si renseignee, sinon le spawn du monde."""
+    def _center(self, level: Any) -> Tuple[int, int, str]:
+        """Centre du scan : config -> joueur en ligne -> spawn -> 0,0.
+
+        Important : sur Endstone 0.11 ``Level`` n'expose PAS d'attribut
+        ``spawn``. Sans joueur en ligne on retombait donc sur (0,0), souvent
+        hors des chunks charges -> tout le scan sortait vide ("vides 4225").
+        """
         center_x = self._cfg_int("center_x", 0)
         center_z = self._cfg_int("center_z", 0)
         if center_x != 0 or center_z != 0:
-            return center_x, center_z
+            return center_x, center_z, "config"
+
+        try:
+            players = list(self.server.online_players or [])
+        except Exception:  # noqa: BLE001
+            players = []
+        for player in players:
+            loc = getattr(player, "location", None)
+            if loc is None:
+                loc = getattr(player, "position", None)
+            x = getattr(loc, "x", None)
+            z = getattr(loc, "z", None)
+            if x is None:
+                x = getattr(player, "x", None)
+            if z is None:
+                z = getattr(player, "z", None)
+            if x is not None and z is not None:
+                try:
+                    return int(x), int(z), "joueur"
+                except Exception:  # noqa: BLE001
+                    pass
 
         spawn = getattr(level, "spawn", None)
-        spawn_x = getattr(spawn, "x", None)
-        spawn_z = getattr(spawn, "z", None)
-        if spawn_x is not None and spawn_z is not None:
-            return int(spawn_x), int(spawn_z)
-        return 0, 0
+        x = getattr(spawn, "x", None)
+        z = getattr(spawn, "z", None)
+        if x is not None and z is not None:
+            try:
+                return int(x), int(z), "spawn"
+            except Exception:  # noqa: BLE001
+                pass
+
+        return 0, 0, "origine"
+
+    def _refresh_loaded(self) -> dict[str, set]:
+        """Coordonnees (cx, cz) des chunks actuellement charges par BDS."""
+        out: dict[str, set] = {}
+        for dim_id, dim in self._dims.items():
+            coords: set = set()
+            try:
+                for chunk in dim.loaded_chunks or []:
+                    coords.add((int(chunk.x), int(chunk.z)))
+            except Exception:  # noqa: BLE001 - API C++ variable
+                coords = set()
+            out[dim_id] = coords
+        return out
 
     def _cfg_str(self, key: str, default: str) -> str:
         try:
