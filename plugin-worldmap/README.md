@@ -10,6 +10,7 @@ serveur Node.js (le projet `mapserver/` à la racine du dépôt).
 | `/map` | état du scan + connexion au serveur de carte |
 | `/mapscan [rayon]` | lance (ou relance) le scan — *op* |
 | `/mapstop` | arrête le scan — *op* |
+| `/maptest` | teste l'URL et la clé d'API du serveur — *op* |
 
 ## Comment ça marche
 
@@ -45,7 +46,7 @@ Copié automatiquement dans le dossier de données du plugin au premier démarra
 
 ```toml
 endpoint = "http://151.240.30.8:10015"   # serveur Node.js
-api_key  = "change-me"                    # doit matcher MAP_API_KEY
+api_key  = "changh"                       # doit matcher la clé du serveur
 
 center_x = 0            # 0,0 = spawn du monde
 center_z = 0

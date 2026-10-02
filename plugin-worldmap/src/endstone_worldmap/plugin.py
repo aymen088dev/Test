@@ -9,6 +9,9 @@ Le scan tourne sur le thread principal du serveur (contrainte de l'API
 Endstone) ; l'envoi HTTP part dans un thread a part entiere.
 """
 
+import json
+import urllib.error
+import urllib.request
 from collections import deque
 from typing import Any, Deque, Optional, Tuple
 
@@ -46,6 +49,11 @@ class WorldMapPlugin(Plugin):
             "usages": ["/mapstop"],
             "permissions": ["worldmap.command.mapstop"],
         },
+        "maptest": {
+            "description": "Teste la connexion et la cle d'API du serveur de carte",
+            "usages": ["/maptest"],
+            "permissions": ["worldmap.command.maptest"],
+        },
     }
 
     permissions = {
@@ -59,6 +67,10 @@ class WorldMapPlugin(Plugin):
         },
         "worldmap.command.mapstop": {
             "description": "Permet d'utiliser /mapstop",
+            "default": "op",
+        },
+        "worldmap.command.maptest": {
+            "description": "Permet d'utiliser /maptest",
             "default": "op",
         },
     }
@@ -103,6 +115,9 @@ class WorldMapPlugin(Plugin):
             )
         else:
             self.logger.info(f"Serveur de carte : {self._sender.url}")
+            self.logger.info(
+                f"Cle d'API chargee : {len(self._sender.api_key)} caracteres"
+            )
 
         # Le plugin porte un @event_handler (PlayerQuitEvent) -> on l'enregistre.
         self.register_events(self)
@@ -138,6 +153,9 @@ class WorldMapPlugin(Plugin):
         if command.name == "mapstop":
             self._cmd_stop(sender)
             return True
+        if command.name == "maptest":
+            self._cmd_test(sender)
+            return True
         return False
 
     @event_handler
@@ -152,9 +170,12 @@ class WorldMapPlugin(Plugin):
     # --- commandes -------------------------------------------------------
 
     def _cmd_status(self, sender: CommandSender) -> None:
+        key_len = len(self._sender.api_key) if self._sender else 0
         sender.send_message(
             f"{ColorFormat.GOLD}Carte{ColorFormat.RESET} : "
-            f"{ColorFormat.WHITE}{self._endpoint()}"
+            f"{ColorFormat.WHITE}{self._endpoint()} "
+            f"{ColorFormat.GRAY}cle {ColorFormat.WHITE}{key_len}"
+            f"{ColorFormat.GRAY} caracteres"
         )
         state = f"{self._processed}/{self._total}" if self._scanning else "arrete"
         sender.send_message(
@@ -171,6 +192,58 @@ class WorldMapPlugin(Plugin):
         )
         if error:
             sender.send_message(f"{ColorFormat.RED}Derniere erreur : {error}")
+
+    def _cmd_test(self, sender: CommandSender) -> None:
+        """Envoie un payload volontairement invalide pour tester la cle / l'URL.
+
+        Le serveur valide la cle AVANT le corps : si la cle est bonne il
+        repond 422 (payload invalide) sans rien stocker ; si elle est fausse
+        il repond 401. Ca teste donc la connexion sans polluer la carte.
+        """
+        if self._sender is None or not self._sender.configured:
+            sender.send_error_message("Aucun endpoint configure (config.toml).")
+            return
+
+        url = self._sender.url
+        key_len = len(self._sender.api_key)
+        sender.send_message(
+            f"{ColorFormat.GOLD}Test{ColorFormat.RESET} -> {ColorFormat.WHITE}{url}"
+            f" {ColorFormat.GRAY}(cle {ColorFormat.WHITE}{key_len}"
+            f"{ColorFormat.GRAY} caracteres)"
+        )
+
+        headers = {"Content-Type": "application/json"}
+        if self._sender.api_key:
+            headers["X-Api-Key"] = self._sender.api_key
+        body = json.dumps({"dim": "worldmap-selftest"}).encode("utf-8")
+        request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=8) as response:
+                code = response.status
+                text = response.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            code = exc.code
+            try:
+                text = exc.read().decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001
+                text = ""
+        except Exception as exc:  # noqa: BLE001 - reseau, DNS, timeout...
+            sender.send_message(f"{ColorFormat.RED}Echec reseau : {exc}")
+            return
+
+        color = ColorFormat.GREEN if code == 422 else ColorFormat.RED
+        sender.send_message(
+            f"{color}HTTP {code}{ColorFormat.RESET} {ColorFormat.GRAY}{text}"
+        )
+        if code == 422:
+            sender.send_message(
+                f"{ColorFormat.GREEN}La cle est ACCEPTEE par le serveur."
+            )
+        elif code == 401:
+            sender.send_message(
+                f"{ColorFormat.RED}Cle REFUSEE : la valeur du plugin ne "
+                f"correspond pas a la cle du serveur de carte."
+            )
 
     def _cmd_stop(self, sender: CommandSender) -> None:
         if not self._scanning:
