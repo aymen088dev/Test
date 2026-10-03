@@ -883,8 +883,11 @@ async function boot() {
     console.error(err);
   }
 
-  updateVisibleTiles();
-  if (new URLSearchParams(location.search).get("view") === "relief") {
+  // La carte s'ouvre a plat (relief vu de dessus) : c'est la vue "de face".
+  // `?view=iso` (ou le bouton 3D) pour repasser en isometrique.
+  if (new URLSearchParams(location.search).get("view") === "iso") {
+    updateVisibleTiles();
+  } else {
     setView("relief");
   }
   setInterval(poll, 8000);

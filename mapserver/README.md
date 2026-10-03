@@ -6,8 +6,9 @@ Endstone et sert dans le navigateur :
 * une **carte isométrique 3D** interactive (style BlueMap), rendue côté client ;
 * un **relief vu de dessus** (plongée) **rendu côté serveur** : le serveur
 génère un PNG ombré à partir des chunks stockés, le navigateur ne fait que
-l'afficher. Bascule `3D` / `Relief` dans l'en-tête de la page (`?view=relief`
-pour ouvrir directement en relief).
+l'afficher. La page **s'ouvre à plat en relief vu de dessus** (la vue « de
+face ») ; la bascule `3D` / `Relief` de l'en-tête permet de revenir à
+l'isométrique (`?view=iso` pour ouvrir directement en 3D).
 
 Deux sources de données sont acceptées :
 
@@ -198,7 +199,8 @@ npm test        # 24 assertions : auth, API, statique, persistance, protocole Mi
 ## Interface
 
 `public/` — canvas plein écran, déplacement à la souris, molette pour zoomer,
-sélecteur de dimension, bascule **3D / Relief**.
+sélecteur de dimension, bascule **3D / Relief**. La carte s'ouvre en **relief**
+(vue de dessus) ; le bouton **3D** bascule vers l'isométrique.
 
 * **Vue relief** : l'image PNG de `/api/relief/<dim>` est affichée telle quelle
   (serveur), avec sa taille en légende. Les tuiles ne sont pas téléchargées dans
