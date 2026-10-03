@@ -25,6 +25,7 @@ const playersCount = document.getElementById("players-count");
 const viewIsoBtn = document.getElementById("view-iso");
 const viewReliefBtn = document.getElementById("view-relief");
 const reliefWrap = document.getElementById("relief-wrap");
+const reliefViewport = document.getElementById("relief-viewport");
 const reliefImg = document.getElementById("relief");
 const reliefCaption = document.getElementById("relief-caption");
 
@@ -576,6 +577,91 @@ function drawPlayers() {
 let reliefUrl = null;
 let reliefToken = 0;
 
+// Pan/zoom de l'image de relief (mode "vu de dessus").
+const reliefView = { zoom: 1, x: 0, y: 0 };
+const RELIEF_MIN_ZOOM = 0.2;
+const RELIEF_MAX_ZOOM = 32;
+
+function applyReliefTransform() {
+  reliefImg.style.transform =
+    "translate(" + reliefView.x + "px, " + reliefView.y + "px) scale(" + reliefView.zoom + ")";
+}
+
+function clampReliefZoom(z) {
+  return Math.max(RELIEF_MIN_ZOOM, Math.min(RELIEF_MAX_ZOOM, z));
+}
+
+function resetReliefView() {
+  reliefView.zoom = 1;
+  reliefView.x = 0;
+  reliefView.y = 0;
+  applyReliefTransform();
+}
+
+/** Zoom relief en gardant le point sous le curseur fixe (clientX/Y optionnels). */
+function reliefZoomAt(factor, clientX, clientY) {
+  const rect = reliefViewport.getBoundingClientRect();
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  const sx = typeof clientX === "number" ? clientX : cx;
+  const sy = typeof clientY === "number" ? clientY : cy;
+  const vx = sx - cx;
+  const vy = sy - cy;
+  const z0 = reliefView.zoom;
+  const z1 = clampReliefZoom(z0 * factor);
+  const k = z1 / z0;
+  reliefView.x = vx - k * (vx - reliefView.x);
+  reliefView.y = vy - k * (vy - reliefView.y);
+  reliefView.zoom = z1;
+  applyReliefTransform();
+}
+
+let reliefDrag = null;
+
+function bindReliefInteraction() {
+  reliefViewport.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 && e.pointerType === "mouse") return;
+    reliefDrag = { x: e.clientX, y: e.clientY };
+    reliefViewport.setPointerCapture(e.pointerId);
+    reliefViewport.classList.add("drag");
+    hideHint();
+  });
+
+  reliefViewport.addEventListener("pointermove", (e) => {
+    if (!reliefDrag) return;
+    reliefView.x += e.clientX - reliefDrag.x;
+    reliefView.y += e.clientY - reliefDrag.y;
+    reliefDrag = { x: e.clientX, y: e.clientY };
+    applyReliefTransform();
+  });
+
+  const endReliefDrag = (e) => {
+    reliefDrag = null;
+    reliefViewport.classList.remove("drag");
+    if (e && e.pointerId !== undefined) {
+      try {
+        reliefViewport.releasePointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+  reliefViewport.addEventListener("pointerup", endReliefDrag);
+  reliefViewport.addEventListener("pointercancel", endReliefDrag);
+
+  reliefViewport.addEventListener(
+    "wheel",
+    (e) => {
+      e.preventDefault();
+      hideHint();
+      reliefZoomAt(e.deltaY < 0 ? 1.16 : 1 / 1.16, e.clientX, e.clientY);
+    },
+    { passive: false }
+  );
+
+  reliefViewport.addEventListener("dblclick", () => resetReliefView());
+}
+
 async function loadRelief() {
   const dim = state.dim;
   const token = ++reliefToken;
@@ -609,19 +695,27 @@ async function loadRelief() {
   }
 }
 
-function setView(view) {
-  if (view === state.view) return;
-  state.view = view;
+/** Bascule l'habillage (boutons, canvas/relief) sans toucher aux donnees. */
+function applyViewUi(view) {
   const relief = view === "relief";
   viewIsoBtn.classList.toggle("active", !relief);
   viewReliefBtn.classList.toggle("active", relief);
   reliefWrap.hidden = !relief;
   canvas.style.visibility = relief ? "hidden" : "visible";
-  for (const id of ["zoom-in", "zoom-out", "zoom-reset"]) {
-    document.getElementById(id).disabled = relief;
-  }
-  hintEl.classList.toggle("hide", relief ? true : !autoFit);
-  if (relief) {
+  // En relief l'indice reste visible jusqu'a la premiere interaction ; en 3D
+  // il suit l'auto-cadrage.
+  if (!relief) hintEl.classList.toggle("hide", !autoFit);
+}
+
+function hideHint() {
+  hintEl.classList.add("hide");
+}
+
+function setView(view) {
+  if (view === state.view) return;
+  state.view = view;
+  applyViewUi(view);
+  if (view === "relief") {
     loadRelief();
   } else {
     scheduleVisibleTiles();
@@ -801,18 +895,39 @@ function bindControls() {
   );
 
   document.getElementById("zoom-in").addEventListener("click", () => {
+    if (state.view === "relief") {
+      reliefZoomAt(1.3);
+      return;
+    }
     stopAuto();
     zoomAt(1.3, canvas.width / 2, canvas.height / 2);
   });
   document.getElementById("zoom-out").addEventListener("click", () => {
+    if (state.view === "relief") {
+      reliefZoomAt(1 / 1.3);
+      return;
+    }
     stopAuto();
     zoomAt(1 / 1.3, canvas.width / 2, canvas.height / 2);
   });
   document.getElementById("zoom-reset").addEventListener("click", () => {
+    if (state.view === "relief") {
+      resetReliefView();
+      return;
+    }
     autoFit = true;
     fit();
     scheduleVisibleTiles();
   });
+
+  // Double-clic : recentre la vue (3D comme relief).
+  canvas.addEventListener("dblclick", () => {
+    autoFit = true;
+    fit();
+    scheduleVisibleTiles();
+  });
+
+  bindReliefInteraction();
 
   viewIsoBtn.addEventListener("click", () => setView("iso"));
   viewReliefBtn.addEventListener("click", () => setView("relief"));
@@ -834,6 +949,7 @@ async function switchDim(dim) {
   offscreen = document.createElement("canvas");
   await loadMeta();
   if (state.view === "relief") {
+    resetReliefView();
     loadRelief();
     return;
   }
@@ -873,6 +989,13 @@ async function boot() {
   bindControls();
   loop();
 
+  // La carte s'ouvre a plat (relief vu de dessus) : c'est la vue "de face".
+  // `?view=iso` (ou le bouton 3D) pour repasser en isometrique. On applique
+  // l'habillage tout de suite pour eviter un flash de la vue 3D.
+  const wantIso = new URLSearchParams(location.search).get("view") === "iso";
+  state.view = wantIso ? "iso" : "relief";
+  applyViewUi(state.view);
+
   try {
     await loadStatus();
     await loadMeta();
@@ -883,12 +1006,11 @@ async function boot() {
     console.error(err);
   }
 
-  // La carte s'ouvre a plat (relief vu de dessus) : c'est la vue "de face".
-  // `?view=iso` (ou le bouton 3D) pour repasser en isometrique.
-  if (new URLSearchParams(location.search).get("view") === "iso") {
+  if (wantIso) {
     updateVisibleTiles();
   } else {
-    setView("relief");
+    resetReliefView();
+    loadRelief();
   }
   setInterval(poll, 8000);
 }
