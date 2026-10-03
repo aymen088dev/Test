@@ -2,8 +2,14 @@
 
 Commandes :
     /map          etat du scan et de la connexion au serveur de carte
-    /mapscan      lance (ou relance) le scan
-    /mapstop      arrete le scan
+    /mapscan      scanne une fois les chunks charges autour des joueurs
+    /mapfollow    suit les joueurs en continu (carte "live")
+    /mapstop      arrete tout
+
+Principe cle : le serveur Bedrock ne garde en memoire que les chunks qui
+entourent les joueurs (view-distance). L'API Endstone ne peut pas lire un
+chunk non charge. Le plugin ne met donc en file QUE les chunks reellement
+charges, centres sur la position des joueurs connectes.
 
 Le scan tourne sur le thread principal du serveur (contrainte de l'API
 Endstone) ; l'envoi HTTP part dans un thread a part entiere.
@@ -24,7 +30,7 @@ from typing_extensions import override
 from .scanner import (
     AIR,
     _block_id,
-    build_queue,
+    build_queue_loaded,
     get_dimension,
     resolve_dimension_id,
     scan_chunk,
@@ -47,9 +53,14 @@ class WorldMapPlugin(Plugin):
             "permissions": ["worldmap.command.map"],
         },
         "mapscan": {
-            "description": "Scanne le monde et l'envoie a la carte web",
+            "description": "Scanne les chunks charges autour des joueurs connectes",
             "usages": ["/mapscan", "/mapscan [radius: int]"],
             "permissions": ["worldmap.command.mapscan"],
+        },
+        "mapfollow": {
+            "description": "Suit les joueurs en continu pour une carte live",
+            "usages": ["/mapfollow"],
+            "permissions": ["worldmap.command.mapfollow"],
         },
         "mapstop": {
             "description": "Arrete le scan en cours",
@@ -76,6 +87,10 @@ class WorldMapPlugin(Plugin):
             "description": "Permet d'utiliser /mapstop",
             "default": "op",
         },
+        "worldmap.command.mapfollow": {
+            "description": "Permet d'utiliser /mapfollow",
+            "default": "op",
+        },
         "worldmap.command.maptest": {
             "description": "Permet d'utiliser /maptest",
             "default": "op",
@@ -96,6 +111,8 @@ class WorldMapPlugin(Plugin):
     _non_charge = 0
     _popped = 0
     _logged = 0
+    _following = False
+    _seen: set = set()
 
     # --- cycle de vie ----------------------------------------------------
 
@@ -123,6 +140,8 @@ class WorldMapPlugin(Plugin):
         self._non_charge = 0
         self._popped = 0
         self._logged = 0
+        self._following = False
+        self._seen = set()
 
         self._sender = MapSender(
             endpoint=self._cfg_str("endpoint", ""),
@@ -149,7 +168,14 @@ class WorldMapPlugin(Plugin):
         # Le plugin porte un @event_handler (PlayerQuitEvent) -> on l'enregistre.
         self.register_events(self)
 
-        if self._cfg_bool("auto_scan", True):
+        auto_scan = self._cfg_bool("auto_scan", False)
+        auto_follow = self._cfg_bool("auto_follow", True)
+        if auto_follow:
+            # Le suivi est prioritaire : au demarrage il n'y a aucun joueur,
+            # donc un scan ponctuel ne pourrait rien produire de toute facon.
+            # Il attend le premier joueur et construit la carte ensuite.
+            self._start_follow(log=True)
+        elif auto_scan:
             self._begin_scan(None)
 
         self.logger.info("WorldMap active.")
@@ -157,6 +183,7 @@ class WorldMapPlugin(Plugin):
     @override
     def on_disable(self) -> None:
         self._scanning = False
+        self._following = False
         if self._sender is not None:
             self._sender.stop()
             self._sender = None
@@ -177,6 +204,9 @@ class WorldMapPlugin(Plugin):
                     return False
             self._begin_scan(sender, radius)
             return True
+        if command.name == "mapfollow":
+            self._cmd_follow(sender)
+            return True
         if command.name == "mapstop":
             self._cmd_stop(sender)
             return True
@@ -187,12 +217,19 @@ class WorldMapPlugin(Plugin):
 
     @event_handler
     def on_player_quit(self, event: PlayerQuitEvent) -> None:
-        """Stoppe le scan quand plus personne n'est en ligne (option)."""
-        if not self._scanning or not self._cfg_bool("stop_when_empty", False):
-            return
-        if not self.server.online_players:
-            self._scanning = False
-            self.logger.info("Plus personne en ligne : scan en pause.")
+        """Le dernier joueur part -> plus aucun chunk charge, la carte gele.
+
+        On ne coupe surtout pas le suivi : il repartira tout seul des que
+        quelqu'un se reconnectera.
+        """
+        try:
+            remaining = list(self.server.online_players or [])
+        except Exception:  # noqa: BLE001
+            remaining = []
+        if not remaining and self._following:
+            self.logger.info(
+                "Plus personne en ligne : suivi en pause (reprise automatique)."
+            )
 
     # --- commandes -------------------------------------------------------
 
@@ -205,6 +242,22 @@ class WorldMapPlugin(Plugin):
             f"{ColorFormat.GRAY} caracteres"
         )
         state = f"{self._processed}/{self._total}" if self._scanning else "arrete"
+        if self._following:
+            state += " (suivi actif)"
+        players = self._players()
+        if players:
+            where = ", ".join(f"{name} @ {x},{z}" for name, x, z in players[:3])
+            loaded = sum(len(s) for s in self._loaded.values())
+            sender.send_message(
+                f"{ColorFormat.GRAY}Joueurs {ColorFormat.WHITE}{len(players)} "
+                f"{ColorFormat.GRAY}({where}) | chunks charges "
+                f"{ColorFormat.WHITE}{loaded}"
+            )
+        else:
+            sender.send_message(
+                f"{ColorFormat.RED}Aucun joueur connecte : BDS ne charge aucun "
+                f"chunk, la carte ne peut pas avancer."
+            )
         sender.send_message(
             f"{ColorFormat.GRAY}Scan {ColorFormat.WHITE}{state} "
             f"{ColorFormat.GRAY}chunks | erreurs {ColorFormat.WHITE}{self._errors} "
@@ -289,6 +342,19 @@ class WorldMapPlugin(Plugin):
             f"{ColorFormat.WHITE}{cx},{cz} "
             f"{ColorFormat.GRAY}({source})"
         )
+        players = self._players()
+        if players:
+            sender.send_message(
+                f"{ColorFormat.GRAY}Joueurs : "
+                + ", ".join(
+                    f"{ColorFormat.WHITE}{name} {ColorFormat.GRAY}@ {x},{z}"
+                    for name, x, z in players
+                )
+            )
+        else:
+            sender.send_message(
+                f"{ColorFormat.RED}Aucun joueur connecte."
+            )
 
         base_cx, base_cz = cx >> 4, cz >> 4
         for name in self._cfg_list("dimensions", ["overworld"]):
@@ -314,6 +380,7 @@ class WorldMapPlugin(Plugin):
                 f"{ColorFormat.GRAY}| chunks charges "
                 f"{ColorFormat.WHITE}{len(loaded)}"
             )
+            self._loaded[dim_id] = {(int(c.x), int(c.z)) for c in loaded}
 
             filled = 0
             first = ""
@@ -338,13 +405,125 @@ class WorldMapPlugin(Plugin):
             )
 
     def _cmd_stop(self, sender: CommandSender) -> None:
-        if not self._scanning:
+        if not self._scanning and not self._following:
             sender.send_message(f"{ColorFormat.GRAY}Aucun scan en cours.")
             return
+        was_following = self._following
         self._scanning = False
+        self._following = False
         sender.send_message(
-            f"{ColorFormat.YELLOW}Scan arrete ({self._processed}/{self._total})."
+            f"{ColorFormat.YELLOW}Scan arrete ({self._processed}/{self._total})"
+            f"{ColorFormat.GRAY}, suivi {'actif -> coupe' if was_following else ''}"
         )
+
+    def _cmd_follow(self, sender: CommandSender) -> None:
+        if self._following:
+            self._following = False
+            sender.send_message(
+                f"{ColorFormat.YELLOW}Suivi desactive"
+                f"{ColorFormat.GRAY} (le scan en cours continue)."
+            )
+            return
+        self._start_follow(log=True)
+        interval = self._cfg_int("follow_interval_seconds", 10)
+        sender.send_message(
+            f"{ColorFormat.GREEN}Suivi actif{ColorFormat.RESET} : "
+            f"{ColorFormat.GRAY}les nouveaux chunks charges autour des joueurs "
+            f"sont envoyes toutes les {ColorFormat.WHITE}{interval}s"
+        )
+
+    def _start_follow(self, log: bool = False) -> None:
+        """Active le mode suivi (carte live) et planifie la premiere passe."""
+        if self._sender is None or not self._sender.configured:
+            if log:
+                self.logger.error("Suivi impossible : aucun endpoint configure.")
+            return
+        if getattr(self.server, "level", None) is None:
+            if log:
+                self.logger.error("Suivi impossible : aucun monde charge.")
+            return
+        self._following = True
+        self._scanning = True
+        self._seen = set()
+        self._queue = deque()
+        self._total = 0
+        self._processed = 0
+        self._errors = 0
+        self._empty = 0
+        self._non_charge = 0
+        self._popped = 0
+        self._logged = 0
+        if not self._dims:
+            self._dims = self._collect_dimensions()
+        self._loaded = self._refresh_loaded()
+        self._schedule_next(delay=2)
+        if log:
+            self.logger.info("Suivi des joueurs active.")
+
+    def _players(self) -> list[tuple[str, int, int]]:
+        """(nom, x, z) des joueurs connectes."""
+        try:
+            online = list(self.server.online_players or [])
+        except Exception:  # noqa: BLE001
+            return []
+
+        out: list[tuple[str, int, int]] = []
+        for player in online:
+            loc = getattr(player, "location", None)
+            if loc is None:
+                loc = getattr(player, "position", None)
+            x = getattr(loc, "x", None)
+            z = getattr(loc, "z", None)
+            if x is None:
+                x = getattr(player, "x", None)
+            if z is None:
+                z = getattr(player, "z", None)
+            if x is None or z is None:
+                continue
+            try:
+                name = str(getattr(player, "name", "?"))
+                out.append((name, int(x), int(z)))
+            except Exception:  # noqa: BLE001
+                continue
+        return out
+
+    def _collect_dimensions(self) -> dict[str, Any]:
+        """Dimension configurees -> {dim_id: objet Dimension}."""
+        level = getattr(self.server, "level", None)
+        dims: dict[str, Any] = {}
+        if level is None:
+            return dims
+        for name in self._cfg_list("dimensions", ["overworld"]):
+            dim_id = resolve_dimension_id(name)
+            dim = get_dimension(level, name)
+            if dim is not None:
+                dims[dim_id] = dim
+        return dims
+
+    def _follow_delay(self) -> int:
+        """Attente en ticks entre deux passes de suivi."""
+        seconds = max(1, self._cfg_int("follow_interval_seconds", 10))
+        return seconds * 20
+
+    def _refill(self) -> int:
+        """Ajoute en file les chunks charges qui n'ont pas encore ete envoyes."""
+        players = self._players()
+        if not players:
+            return 0
+        if not self._dims:
+            self._dims = self._collect_dimensions()
+        self._loaded = self._refresh_loaded()
+        fresh = build_queue_loaded(
+            [(x, z) for _name, x, z in players],
+            self._cfg_int("radius_chunks", 0),
+            list(self._dims.keys()),
+            self._loaded,
+            seen=self._seen,
+        )
+        if fresh:
+            self._queue.extend(fresh)
+            self._total += len(fresh)
+        return len(fresh)
 
     def _begin_scan(
         self,
@@ -362,30 +541,47 @@ class WorldMapPlugin(Plugin):
                 sender.send_error_message("Aucun monde charge.")
             return
 
-        # Dimensions demandees
-        dims: dict[str, Any] = {}
-        missing: list[str] = []
-        for name in self._cfg_list("dimensions", ["overworld"]):
-            dim_id = resolve_dimension_id(name)
-            dim = get_dimension(level, name)
-            if dim is None:
-                missing.append(name)
-            else:
-                dims[dim_id] = dim
-
+        dims = self._collect_dimensions()
         if not dims:
             if sender:
-                sender.send_error_message(f"Dimensions introuvables : {missing}")
+                sender.send_error_message(
+                    "Dimensions introuvables : "
+                    f"{self._cfg_list('dimensions', ['overworld'])}"
+                )
             return
 
-        center_x, center_z, center_src = self._center(level)
         if radius is None:
-            radius = self._cfg_int("radius_chunks", 32)
+            radius = self._cfg_int("radius_chunks", 0)
 
-        queue = build_queue(center_x, center_z, radius, list(dims.keys()))
-
+        players = self._players()
         self._dims = dims
         self._loaded = self._refresh_loaded()
+        loaded_total = sum(len(s) for s in self._loaded.values())
+
+        # Sans joueur connecte, BDS ne charge aucun chunk : on le dit clairement
+        # plutot que de lancer un scan qui ne peut rien produire.
+        if not players:
+            msg = (
+                f"{ColorFormat.RED}Aucun joueur connecte.{ColorFormat.RESET} "
+                f"{ColorFormat.GRAY}Le serveur Bedrock ne charge que les chunks "
+                f"autour des joueurs ({loaded_total} charges actuellement). "
+                f"Connecte-toi puis relance /mapscan."
+            )
+            if sender:
+                sender.send_message(msg)
+            else:
+                self.logger.warning(msg)
+            return
+
+        queue = build_queue_loaded(
+            [(x, z) for _name, x, z in players],
+            radius,
+            list(dims.keys()),
+            self._loaded,
+        )
+
+        self._following = False
+        self._seen = set()
         self._queue = deque(queue)
         self._total = len(queue)
         self._processed = 0
@@ -399,24 +595,26 @@ class WorldMapPlugin(Plugin):
         # On purge un eventuel scan precedent en planifiant une seule tache.
         self._schedule_next(delay=1)
 
+        where = ", ".join(f"{name} @ {x},{z}" for name, x, z in players)
         message = (
             f"{ColorFormat.GREEN}Scan lance : {ColorFormat.WHITE}{self._total} "
-            f"{ColorFormat.GRAY}chunks ({ColorFormat.WHITE}rayon {radius}"
-            f"{ColorFormat.GRAY}) vers {ColorFormat.WHITE}{self._endpoint()} "
-            f"{ColorFormat.GRAY}centre {ColorFormat.WHITE}{center_x},{center_z} "
-            f"{ColorFormat.GRAY}({center_src})"
+            f"{ColorFormat.GRAY}chunks charges vers "
+            f"{ColorFormat.WHITE}{self._endpoint()}\n"
+            f"{ColorFormat.GRAY}Joueurs : {ColorFormat.WHITE}{where} "
+            f"{ColorFormat.GRAY}| chunks charges en memoire : "
+            f"{ColorFormat.WHITE}{loaded_total}"
+            + (
+                f"\n{ColorFormat.GRAY}Rayon limite a {ColorFormat.WHITE}{radius}"
+                f"{ColorFormat.GRAY} chunks autour de chaque joueur."
+                if radius > 0
+                else ""
+            )
         )
-        if missing:
-            message += f"\n{ColorFormat.YELLOW}Dimensions ignorees : {missing}"
         if sender:
             sender.send_message(message)
         self.logger.info(
-            f"Scan lance : {self._total} chunks, rayon {radius}, "
-            f"dims {sorted(dims)} -> {center_x}, {center_z} ({center_src})"
-        )
-        charged = self._loaded.get(list(dims.keys())[0], set())
-        self.logger.info(
-            f"Chunks charges dans la zone : {len(charged)}"
+            f"Scan lance : {self._total} chunks charges sur {loaded_total}, "
+            f"rayon {radius}, dims {sorted(dims)}, joueurs {where}"
         )
 
     # --- boucle de scan --------------------------------------------------
@@ -436,16 +634,16 @@ class WorldMapPlugin(Plugin):
             return
 
         if not self._queue:
-            self._scanning = False
-            stats = self._sender.stats() if self._sender else {}
-            self.logger.info(
-                f"Scan termine : {self._processed} chunks | "
-                f"vides {self._empty} | non charges {self._non_charge} | "
-                f"envoyes {stats.get('sent', 0)} | "
-                f"echecs {stats.get('failed', 0)} | "
-                f"erreur {stats.get('last_error') or '-'}"
-            )
-            return
+            if self._following:
+                # Mode carte live : on cherche les nouveaux chunks charges.
+                found = self._refill()
+                if not found:
+                    self._schedule_next(delay=self._follow_delay())
+                    return
+            else:
+                self._scanning = False
+                self._log_end()
+                return
 
         budget = max(1, self._cfg_int("chunks_per_tick", 2))
         depth = self._cfg_int("depth", 4)
@@ -465,17 +663,14 @@ class WorldMapPlugin(Plugin):
             if dim is None:
                 continue
 
-            # Un chunk non charge ne contient aucune donnee pour BDS : on le
-            # saute plutot que de produire un chunk vide inutilement.
+            # Filet de securite : BDS peut decharger un chunk entre la mise en
+            # file et son traitement. On ne produit alors pas de chunk vide.
             loaded = self._loaded.get(dim_id)
-            if loaded and (cx, cz) not in loaded:
+            if loaded is not None and (cx, cz) not in loaded:
                 self._non_charge += 1
                 continue
 
             try:
-                # On lit les colonnes directement : BDS charge le chunk au
-                # besoin (comme BlueMap). L'API Endstone 0.11 n'expose PAS de
-                # is_chunk_generated ; l'appeler faisait echouer chaque chunk.
                 payload = scan_chunk(dim, dim_id, cx, cz, depth)
             except Exception as exc:  # noqa: BLE001
                 self._errors += 1
@@ -488,22 +683,39 @@ class WorldMapPlugin(Plugin):
                 # Chunk lu mais sans aucun bloc : rien a envoyer. On le compte
                 # a part pour ne pas le confondre avec un envoi qui a marche.
                 self._empty += 1
-            elif self._sender is not None:
-                self._sender.submit(payload)
+            else:
+                if len(self._seen) > 400000:
+                    self._seen.clear()
+                self._seen.add((dim_id, cx, cz))
+                if self._sender is not None:
+                    self._sender.submit(payload)
 
         # Trace de progression : permet de voir si les envois partent vraiment.
         if self._processed - self._logged >= 250:
             self._logged = self._processed
-            stats = self._sender.stats() if self._sender else {}
-            self.logger.info(
-                f"Scan {self._processed}/{self._total} | "
-                f"envoyes {stats.get('sent', 0)} | "
-                f"echecs {stats.get('failed', 0)} | "
-                f"file {stats.get('queued', 0)} | "
-                f"erreur {stats.get('last_error') or '-'}"
-            )
+            self._log_progress()
 
         self._schedule_next(delay=1)
+
+    def _log_progress(self) -> None:
+        stats = self._sender.stats() if self._sender else {}
+        self.logger.info(
+            f"Scan {self._processed}/{self._total} | "
+            f"envoyes {stats.get('sent', 0)} | "
+            f"echecs {stats.get('failed', 0)} | "
+            f"file {stats.get('queued', 0)} | "
+            f"erreur {stats.get('last_error') or '-'}"
+        )
+
+    def _log_end(self) -> None:
+        stats = self._sender.stats() if self._sender else {}
+        self.logger.info(
+            f"Scan termine : {self._processed} chunks | "
+            f"vides {self._empty} | non charges {self._non_charge} | "
+            f"envoyes {stats.get('sent', 0)} | "
+            f"echecs {stats.get('failed', 0)} | "
+            f"erreur {stats.get('last_error') or '-'}"
+        )
 
     # --- helpers ---------------------------------------------------------
 

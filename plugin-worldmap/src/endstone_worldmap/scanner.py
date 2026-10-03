@@ -147,31 +147,61 @@ def _palette_index(palette: list[str], index: dict[str, int], block_id: str) -> 
     return idx
 
 
-def build_queue(
-    center_x: int,
-    center_z: int,
+def build_queue_loaded(
+    positions: list[tuple[int, int]],
     radius_chunks: int,
     dimensions: list[str],
+    loaded: dict[str, Any],
+    seen: Optional[set] = None,
 ) -> list[tuple[str, int, int]]:
-    """Construit la liste (dim, cx, cz) a scanner autour d'un centre."""
-    if radius_chunks < 1:
-        radius_chunks = 1
+    """Construit la file (dim, cx, cz) a partir des chunks CHARGES par BDS.
 
-    center_cx = center_x >> 4
-    center_cz = center_z >> 4
-    lo_x = center_cx - radius_chunks
-    hi_x = center_cx + radius_chunks
-    lo_z = center_cz - radius_chunks
-    hi_z = center_cz + radius_chunks
+    Pourquoi pas une simple grille autour d'un centre : le serveur Bedrock
+    ne garde en memoire que les chunks autour des joueurs (view-distance).
+    Tout chunk absent de ``Dimension.loaded_chunks`` n'existe pas pour
+    l'API : il rendrait ``None`` a chaque colonne. Une grille de rayon 32
+    (1024 blocs) produisait donc 4 225 chunks vides.
 
+    ``positions`` : (x, z) de chaque joueur connecte. Si la liste est vide,
+    aucun chunk n'est charge -> file vide (c'est normal, pas une erreur).
+
+    ``radius_chunks`` : 0 (ou moins) = pas de limite, sinon on ne garde que
+    les chunks a moins de ``radius_chunks`` chunks d'un joueur.
+
+    ``seen`` : chunks deja envoyes, ignores ici (mode suivi).
+    """
+    if not positions:
+        return []
+
+    limit = max(0, int(radius_chunks or 0))
     queue: list[tuple[str, int, int]] = []
+
     for name in dimensions:
         dim_id = resolve_dimension_id(name)
-        # Tri par distance au centre : le coeur de la carte est pret en premier.
-        ring = sorted(
-            ((dx, dz) for dx in range(lo_x, hi_x + 1) for dz in range(lo_z, hi_z + 1)),
-            key=lambda p: (p[0] - center_cx) ** 2 + (p[1] - center_cz) ** 2,
-        )
-        for cx, cz in ring:
+        coords = set(loaded.get(dim_id) or ())
+        candidates: list[tuple[int, int]] = []
+
+        for cx, cz in coords:
+            if seen is not None and (dim_id, cx, cz) in seen:
+                continue
+            if limit:
+                inside = False
+                for px, pz in positions:
+                    if abs(cx - (px >> 4)) <= limit and abs(cz - (pz >> 4)) <= limit:
+                        inside = True
+                        break
+                if not inside:
+                    continue
+            candidates.append((cx, cz))
+
+        # Tri par distance au joueur le plus proche : la carte se construit
+        # depuis ce que le joueur a sous ses pieds.
+        def distance(chunk: tuple[int, int]) -> int:
+            cx, cz = chunk
+            return min((cx - (px >> 4)) ** 2 + (cz - (pz >> 4)) ** 2 for px, pz in positions)
+
+        candidates.sort(key=distance)
+        for cx, cz in candidates:
             queue.append((dim_id, cx, cz))
+
     return queue

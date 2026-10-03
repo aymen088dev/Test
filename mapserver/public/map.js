@@ -19,6 +19,9 @@ const liveLabel = document.getElementById("live-label");
 const dimSelect = document.getElementById("dim-select");
 const dimLabel = document.getElementById("dim-label");
 const chunkCountEl = document.getElementById("chunk-count");
+const playersPanel = document.getElementById("players-panel");
+const playersList = document.getElementById("players-list");
+const playersCount = document.getElementById("players-count");
 
 /* ------------------------------------------------------------------ */
 /*  Etat                                                               */
@@ -32,6 +35,7 @@ const state = {
   meta: null,
   fetching: new Set(),
   pending: 0,
+  players: new Map(), // dim -> [ { name, x, y, z } ]
 };
 
 const cam = { panX: 0, panY: 0, zoom: 1 };
@@ -457,12 +461,106 @@ function render() {
     ctx.imageSmoothingEnabled = cam.zoom < 1;
     ctx.drawImage(offscreen, screenX(extent.uMin), screenY(extent.vMin), dw, dh);
   }
+
+  drawPlayers();
 }
 
 function loop() {
   stepRebuild();
   render();
   requestAnimationFrame(loop);
+}
+
+/* ------------------------------------------------------------------ */
+/*  Joueurs (payload MipMap /api/players-data)                        */
+/* ------------------------------------------------------------------ */
+
+async function loadPlayers() {
+  let data;
+  try {
+    data = await getJson("api/players");
+  } catch {
+    // Le serveur expose peut-etre pas /api/players (version anterieure) :
+    // on masque simplement les marqueurs plutot que de casser la carte.
+    return 0;
+  }
+  state.players = new Map();
+  const dims = data && data.dimensions ? data.dimensions : {};
+  let total = 0;
+  for (const dim of Object.keys(dims)) {
+    const list = dims[dim] || [];
+    state.players.set(dim, list);
+    total += list.length;
+  }
+  playersCount.textContent = total;
+  playersPanel.hidden = total === 0;
+  renderPlayerList();
+  return total;
+}
+
+function renderPlayerList() {
+  const list = state.players.get(state.dim) || [];
+  playersList.innerHTML = "";
+  for (const player of list) {
+    const li = document.createElement("li");
+    const dot = document.createElement("span");
+    dot.className = "swatch";
+    const name = document.createElement("span");
+    name.textContent = player.name;
+    const where = document.createElement("span");
+    where.className = "where";
+    where.textContent = Math.round(player.x) + ", " + Math.round(player.z);
+    li.append(dot, name, where);
+    playersList.appendChild(li);
+  }
+}
+
+/** Marqueurs : silhouette posee au sol + tete, et nom quand c'est lisible. */
+function drawPlayers() {
+  const list = state.players.get(state.dim);
+  if (!list || !list.length) return;
+  const s = renderScale * cam.zoom;
+  const headY = 1.8; // hauteur de tete en blocs
+
+  for (const player of list) {
+    const px = screenX(isoU(player.x, player.z));
+    const py = screenY(isoV(player.x, player.z, player.y));
+    if (px < -40 || py < -40 || px > canvas.width + 40 || py > canvas.height + 40) {
+      continue;
+    }
+
+    // Ombre au sol
+    ctx.fillStyle = "rgba(0, 0, 0, 0.35)";
+    ctx.beginPath();
+    ctx.ellipse(px, py, Math.max(3, s * 0.32), Math.max(1.5, s * 0.16), 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Corps
+    const head = py - headY * s;
+    ctx.strokeStyle = "#35c4e8";
+    ctx.lineWidth = Math.max(1.5, Math.min(3.5, s * 0.14));
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    ctx.lineTo(px, head);
+    ctx.stroke();
+
+    // Tete
+    ctx.fillStyle = "#2ee6a8";
+    ctx.beginPath();
+    ctx.arc(px, head, Math.max(2.5, Math.min(9, s * 0.3)), 0, Math.PI * 2);
+    ctx.fill();
+
+    if (s >= 9) {
+      ctx.font = "600 12px 'Segoe UI', system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(6, 10, 14, 0.85)";
+      ctx.strokeText(player.name, px, head - Math.max(6, s * 0.5));
+      ctx.fillStyle = "#e8eff7";
+      ctx.fillText(player.name, px, head - Math.max(6, s * 0.5));
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -656,6 +754,7 @@ async function switchDim(dim) {
   if (dim === state.dim) return;
   state.dim = dim;
   dimLabel.textContent = dim.replace("minecraft:", "");
+  renderPlayerList();
   state.chunks.clear();
   state.tiles.clear();
   state.fetching.clear();
@@ -683,6 +782,7 @@ async function poll() {
       await loadMeta();
       updateVisibleTiles();
     }
+    await loadPlayers();
   } catch {
     liveEl.classList.remove("on");
     liveEl.classList.add("err");
@@ -698,6 +798,7 @@ async function boot() {
   try {
     await loadStatus();
     await loadMeta();
+    await loadPlayers();
   } catch (err) {
     liveEl.classList.add("err");
     liveLabel.textContent = "hors ligne";

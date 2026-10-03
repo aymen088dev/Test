@@ -10,15 +10,20 @@ api_key = "changh"
 # ------------------------------------------------------------------
 # Zone a scanner
 # ------------------------------------------------------------------
-# Centre du scan en blocs. Laisse a 0,0 pour utiliser le spawn.
+# IMPORTANT : le serveur Bedrock ne charge en memoire que les chunks qui
+# entourent les joueurs connectes (view-distance du serveur). Le plugin ne
+# scanne donc QUE ces chunks-la, centres sur la position des joueurs.
+# Il faut au moins un joueur connecte pour que la carte avance.
+#
+# Centre impose (facultatif). Si center_x = center_z = 0 (defaut), le
+# plugin suit les joueurs connectes.
 center_x = 0
 center_z = 0
 
-# Rayon du scan en CHUNKS autour du centre.
-#   32  -> ~1 000 blocs de rayon   (rapide)
-#   64  -> ~2 000 blocs de rayon
-#  128  -> ~4 000 blocs de rayon   (lent, beaucoup de donnees)
-radius_chunks = 32
+# Rayon maximal autour de chaque joueur, en CHUNKS.
+#   0 = pas de limite (tout ce qui est charge)
+#   8 = uniquement les chunks a moins de 128 blocs du joueur
+radius_chunks = 0
 
 # Dimensions a scanner : "overworld", "nether", "the_end"
 dimensions = ["overworld"]
@@ -38,8 +43,13 @@ chunks_per_tick = 2
 # Pause (ms) entre deux envois HTTP (evite de saturer le reseau)
 send_delay_ms = 50
 
-# Lancer un scan automatiquement au demarrage
-auto_scan = true
+# Lancer UN scan au demarrage (peu utile : aucun joueur n'est encore
+# connecte). Le suivi ci-dessous est prevu pour ca.
+auto_scan = false
 
-# Arreter le scan si plus aucun joueur n'est connecte
-stop_when_empty = false
+# Suivre les joueurs en continu : chaque nouvelle zone exploree est pushed
+# vers la carte toutes les follow_interval_seconds secondes.
+auto_follow = true
+
+# Pause (en secondes) entre deux passages du suivi
+follow_interval_seconds = 10

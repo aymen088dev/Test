@@ -5,6 +5,8 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 
+const { chunksFromMipmap, playersFromMipmap, dimensionLabel } = require("./mipmap");
+
 // ---------------------------------------------------------------------------
 // CONFIGURATION - modifie directement la cle ici
 // ---------------------------------------------------------------------------
@@ -18,6 +20,9 @@ const API_KEY = "change-me";
 const TILE_CHUNKS = Number(process.env.MAP_TILE_CHUNKS || 8);
 const MAX_BODY = 512 * 1024;
 const APPEND_FLUSH = 200000;
+// Un joueur envoye par MipMap toutes les 5 s (100 ticks) : au-dela de 30 s sans
+// nouvelle position on le considere parti.
+const PLAYER_TTL_MS = Number(process.env.MAP_PLAYER_TTL_MS || 30000);
 
 const SEP = "\u0000";
 
@@ -27,6 +32,7 @@ class MapStore {
     this.chunks = new Map();
     this.tiles = new Map();
     this.dims = new Map();
+    this.players = new Map();
     this.dataFile = dataFile;
     this.stream = null;
     this.lines = 0;
@@ -121,6 +127,48 @@ class MapStore {
     return this.chunks.get(this._key(dim, cx, cz)) || null;
   }
 
+  /* --- joueurs (payload MipMap) ------------------------------------ */
+
+  putPlayers(list) {
+    const now = Date.now();
+    for (const player of list) {
+      this.players.set(player.name, { ...player, ts: player.ts || now });
+    }
+    this.playersSeen = now;
+    return list.length;
+  }
+
+  /**
+   * Joueurs recents, grouped par dimension.
+   * Un joueur absent du dernier payload est considere parti : on retire
+   * aussi les entrees trop anciennes (serveur de carte relance, plugin arrete).
+   */
+  onlinePlayers(ttlMs = PLAYER_TTL_MS) {
+    const now = Date.now();
+    const byDim = new Map();
+    for (const [name, player] of this.players) {
+      if (now - player.ts > ttlMs) {
+        this.players.delete(name);
+        continue;
+      }
+      let list = byDim.get(player.dimension);
+      if (!list) {
+        list = [];
+        byDim.set(player.dimension, list);
+      }
+      list.push({
+        name: player.name,
+        xuid: player.xuid,
+        x: player.x,
+        y: player.y,
+        z: player.z,
+        skin: player.skin,
+        skinShape: player.skinShape,
+      });
+    }
+    return byDim;
+  }
+
   tile(dim, tx, tz) {
     const bucket = this.tiles.get(this._tileKey(dim, tx, tz));
     if (!bucket) return [];
@@ -146,6 +194,7 @@ class MapStore {
       chunks: this.chunks.size,
       tiles: this.tiles.size,
       dimensions: Array.from(this.dims.keys()),
+      players: this.players.size,
       persisted: Boolean(this.stream),
     };
   }
@@ -305,12 +354,89 @@ function handleChunkPost(req, res, store, apiKey, onReject) {
     .catch((err) => sendJson(res, 413, { error: err.message }));
 }
 
+/**
+ * POST /api/chunks-data  <- plugin MipMap (endpoint `api.chunks`)
+ *
+ * Le plugin n'envoie aucun header d'authentification (URL libre dans sa
+ * config). On peut verrouiller la route avec MAP_MIPMAP_TOKEN :
+ * le plugin accepte n'importe quelle URL, donc
+ *   api.chunks = "http://.../api/chunks-data?key=<token>"
+ * reste 100 % compatible.
+ */
+function handleMipmapChunksPost(req, res, store, token) {
+  if (token && req.mipmapKey !== token) {
+    req.resume();
+    sendJson(res, 401, { error: "jeton invalide" });
+    return;
+  }
+  readBody(req, MAX_BODY)
+    .then((buf) => {
+      let body;
+      try {
+        body = JSON.parse(buf.toString("utf8"));
+      } catch {
+        sendJson(res, 400, { error: "JSON invalide" });
+        return;
+      }
+      const result = chunksFromMipmap(body);
+      if (result.error) {
+        sendJson(res, 422, { error: result.error });
+        return;
+      }
+      let created = 0;
+      for (const payload of result.payloads) {
+        if (store.put(payload)) created += 1;
+      }
+      // 200 obligatoire : sinon le plugin journalise une erreur par chunk.
+      sendJson(res, 200, {
+        ok: true,
+        dim: result.dim,
+        chunks: result.payloads.length,
+        created: created,
+      });
+    })
+    .catch((err) => sendJson(res, 413, { error: err.message }));
+}
+
+/**
+ * POST /api/players-data  <- plugin MipMap (endpoint `api.players`)
+ */
+function handleMipmapPlayersPost(req, res, store, token) {
+  if (token && req.mipmapKey !== token) {
+    req.resume();
+    sendJson(res, 401, { error: "jeton invalide" });
+    return;
+  }
+  readBody(req, MAX_BODY)
+    .then((buf) => {
+      let body;
+      try {
+        body = JSON.parse(buf.toString("utf8"));
+      } catch {
+        sendJson(res, 400, { error: "JSON invalide" });
+        return;
+      }
+      const result = playersFromMipmap(body);
+      if (result.error) {
+        sendJson(res, 422, { error: result.error });
+        return;
+      }
+      const count = store.putPlayers(result.players);
+      sendJson(res, 200, { ok: true, players: count });
+    })
+    .catch((err) => sendJson(res, 413, { error: err.message }));
+}
+
 function createApp(options = {}) {
   const store = options.store || new MapStore(options);
   const apiKey =
     options.apiKey !== undefined
       ? options.apiKey
       : process.env.MAP_API_KEY || API_KEY;
+  const mipmapToken =
+    options.mipmapToken !== undefined
+      ? options.mipmapToken
+      : process.env.MAP_MIPMAP_TOKEN || "";
   const publicDir = options.publicDir || PUBLIC_DIR;
   const startedAt = Date.now();
   let authRejected = 0;
@@ -323,15 +449,34 @@ function createApp(options = {}) {
       return;
     }
 
-    let pathname = req.url || "/";
+    let url;
     try {
-      pathname = decodeURIComponent(new URL(pathname, "http://localhost").pathname);
+      url = new URL(req.url || "/", "http://localhost");
     } catch {
       sendJson(res, 400, { error: "url invalide" });
       return;
     }
+    let pathname;
+    try {
+      pathname = decodeURIComponent(url.pathname);
+    } catch {
+      sendJson(res, 400, { error: "url invalide" });
+      return;
+    }
+    // Jeton optionnel des routes MipMap : il transite par l'URL configuree
+    // dans le plugin, donc aucun header n'est necessaire.
+    req.mipmapKey = url.searchParams.get("key") || req.headers["x-api-key"] || "";
 
     try {
+      if (pathname === "/api/chunks-data" && req.method === "POST") {
+        handleMipmapChunksPost(req, res, store, mipmapToken);
+        return;
+      }
+
+      if (pathname === "/api/players-data" && req.method === "POST") {
+        handleMipmapPlayersPost(req, res, store, mipmapToken);
+        return;
+      }
       if (pathname === "/api/chunk" && req.method === "POST") {
         handleChunkPost(req, res, store, apiKey, (given) => {
           authRejected += 1;
@@ -353,20 +498,62 @@ function createApp(options = {}) {
       }
 
       if (pathname === "/api/status") {
+        const playersByDim = store.onlinePlayers();
+        // Une dimension peut n'avoir que des joueurs pour l'instant (le
+        // plugin envoie les positions avant le moindre chunk) : on la
+        // propose quand meme au selecteur.
+        const dims = Array.from(store.dims.keys());
+        for (const dim of playersByDim.keys()) {
+          if (!dims.includes(dim)) dims.push(dim);
+        }
         sendJson(res, 200, {
           ok: true,
           tile_size: store.tileChunks,
           uptime_seconds: Math.round((Date.now() - startedAt) / 1000),
           auth_rejected: authRejected,
           ...store.stats(),
+          dimensions: dims,
+          players_online: Array.from(playersByDim.values()).reduce(
+            (n, list) => n + list.length,
+            0
+          ),
+        });
+        return;
+      }
+
+      if (pathname === "/api/players") {
+        const playersByDim = store.onlinePlayers();
+        const out = {};
+        for (const [dim, list] of playersByDim) out[dim] = list;
+        sendJson(res, 200, {
+          ok: true,
+          updated: store.playersSeen || 0,
+          count: Array.from(playersByDim.values()).reduce((n, l) => n + l.length, 0),
+          dimensions: out,
         });
         return;
       }
 
       if (pathname === "/api/meta") {
-        const dim = new URL(req.url, "http://localhost").searchParams.get("dim");
+        const dim = url.searchParams.get("dim");
         const meta = dim ? store.dims.get(dim) : null;
         if (!meta) {
+          // Pas encore de chunk pour cette dimension : on renvoie une meta
+          // vide plutot qu'une 404, sinon l'interface casse a l'arrivee d'un
+          // joueur dans une dimension non encore cartographiee.
+          if (dim && store.onlinePlayers().has(dim)) {
+            sendJson(res, 200, {
+              dim: dim,
+              count: 0,
+              min_cx: 0,
+              max_cx: 0,
+              min_cz: 0,
+              max_cz: 0,
+              y_min: -64,
+              y_max: 320,
+            });
+            return;
+          }
           sendJson(res, 404, { error: "dimension inconnue", dim: dim });
           return;
         }
@@ -398,7 +585,7 @@ function createApp(options = {}) {
       }
 
       if (pathname === "/api/chunks") {
-        const params = new URL(req.url, "http://localhost").searchParams;
+        const params = url.searchParams;
         const dim = params.get("dim");
         const cx0 = Number(params.get("cx0"));
         const cz0 = Number(params.get("cz0"));
@@ -435,13 +622,18 @@ function main() {
   const dataFile =
     process.env.MAP_DATA_FILE || path.join(__dirname, "data", "chunks.ndjson");
   const apiKey = process.env.MAP_API_KEY || API_KEY;
+  const mipmapToken = process.env.MAP_MIPMAP_TOKEN || "";
 
-  const app = createApp({ dataFile: dataFile, apiKey: apiKey });
+  const app = createApp({ dataFile: dataFile, apiKey: apiKey, mipmapToken: mipmapToken });
 
   app.server.listen(port, host, () => {
     console.log(`[map] carte dispo sur http://${host}:${port}/`);
     console.log(`[map] donnees : ${dataFile}`);
-    console.log(`[map] auth ecriture : ${apiKey ? "activee" : "desactivee"}`);
+    console.log(`[map] auth WorldMap (X-Api-Key) : ${apiKey ? "activee" : "desactivee"}`);
+    console.log(
+      `[map] routes MipMap : POST /api/chunks-data, /api/players-data` +
+        ` (${mipmapToken ? "jeton exige (?key=)" : "ouvertes, sans jeton"})`
+    );
     console.log(`[map] chunks en memoire : ${app.store.chunks.size}`);
   });
 

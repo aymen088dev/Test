@@ -48,7 +48,11 @@ class FakeBlock:
 
 
 class FakeDimension:
-    """Colonne de surface a y=64, avec 4 blocs de profondeur."""
+    """Colonne de surface a y=64, avec 4 blocs de profondeur.
+
+    Comme BDS, seule une fenetre de chunks autour du joueur est "chargee" :
+    lire un chunk hors de cette fenetre renvoie None (de l'air partout).
+    """
 
     def __init__(self) -> None:
         self.surface = {}
@@ -56,8 +60,13 @@ class FakeDimension:
             for z in range(0, 32):
                 self.surface[(x, z)] = (64, "minecraft:grass_block")
 
-    def is_chunk_generated(self, cx: int, cz: int) -> bool:
-        return True
+    @property
+    def loaded_chunks(self):
+        class _Chunk:
+            def __init__(self, x: int, z: int) -> None:
+                self.x, self.z = x, z
+
+        return [_Chunk(cx, cz) for cx in range(0, 2) for cz in range(0, 2)]
 
     def get_highest_block_at(self, x: int, z: int):
         top = self.surface.get((x, z))
@@ -86,16 +95,35 @@ def http_get(url: str) -> dict:
 
 
 def main() -> int:
-    # 1) build_queue -----------------------------------------------------
-    queue = scanner.build_queue(0, 0, 2, ["overworld"])
-    assert len(queue) == 25, f"rayon 2 -> 25 chunks, obtenu {len(queue)}"
-    assert scanner.resolve_dimension_id("overworld") == "minecraft:overworld"
+    # 1) build_queue_loaded : uniquement les chunks charges, autour du joueur
+    dim_id = scanner.resolve_dimension_id("overworld")
+    assert dim_id == "minecraft:overworld"
     assert scanner.resolve_dimension_id("nether") == "minecraft:nether"
-    print("[1/4] build_queue + dimensions            OK")
+
+    loaded = {dim_id: {(cx, cz) for cx in range(0, 4) for cz in range(0, 4)}}
+    # Joueur au centre de la fenetre chargee.
+    queue = scanner.build_queue_loaded([(16, 16)], 0, ["overworld"], loaded)
+    assert len(queue) == 16, f"16 chunks charges -> 16 en file, obtenu {len(queue)}"
+    assert queue[0] == (dim_id, 1, 1), "tri par distance au joueur"
+
+    # Un joueur loin de la fenetre chargee : rien dans son rayon.
+    assert scanner.build_queue_loaded([(4096, 4096)], 4, ["overworld"], loaded) == []
+
+    # Sans joueur : aucun chunk charge en memoire, donc file vide.
+    assert scanner.build_queue_loaded([], 0, ["overworld"], loaded) == []
+
+    # Rayon limite autour du joueur (en chunks, depuis sa position).
+    near = scanner.build_queue_loaded([(8, 8)], 1, ["overworld"], loaded)
+    assert set(near) == {(dim_id, 0, 0), (dim_id, 1, 0), (dim_id, 0, 1), (dim_id, 1, 1)}, near
+
+    # Le mode suivi ignore les chunks deja envoyes.
+    seen = {(dim_id, 0, 0), (dim_id, 1, 1)}
+    rest = scanner.build_queue_loaded([(16, 16)], 0, ["overworld"], loaded, seen=seen)
+    assert len(rest) == 14 and (dim_id, 0, 0) not in rest
+    print("[1/4] build_queue_loaded (chunks charges)  OK")
 
     # 2) scan_chunk ------------------------------------------------------
     dim = FakeDimension()
-    dim_id = scanner.resolve_dimension_id("overworld")
     payload = scanner.scan_chunk(dim, dim_id, 0, 0, depth=4)
     assert payload is not None, "le chunk ne doit pas etre vide"
     assert len(payload["cells"]) == 256, "256 colonnes"
