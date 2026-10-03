@@ -239,9 +239,19 @@ lumière nord-ouest, courbes de niveau. Particularités de ce port :
   couvre 256 blocs à 1 px/bloc : la tuile est rendue **directement** à la
   résolution demandée (pas de pyramide pré-générée comme `zoomGenerator.py`) ;
 * les textures animées (bandes 16×64…) ne gardent que la **première image** ;
-* les tuiles sont **mises en cache** et invalidées dès qu'un nouveau chunk
-  arrive (`store.rev`) ; une zone non cartographiée répond `404` (Leaflet
-  n'affiche simplement rien).
+* la **banque de textures est complétée** : beaucoup de blocs Bedrock n'ont pas
+  de fichier à leur nom (clôtures, murs, vitres, portes…). MipMap les peignait
+  en magenta ; ici le bloc est résolu vers son matériau de base
+  (`oak_fence` → `oak_planks`, `*_wall` → pierre, `*_glass_pane` → verre teinté,
+  `melon` → `melon_block`, `iron_bars` → `iron_block`…), et à défaut il est
+  peint avec la **couleur du bloc** (`public/blocks.js`) — plus de blocs roses ;
+* les tuiles sont **mises en cache** (clé `store.rev`) et revalidées par `ETag`
+  (`Cache-Control: no-cache`, `304` si rien n'a bougé) : le navigateur ne
+  conserve donc pas une tuile vide alors que des chunks viennent d'arriver ;
+* une zone non cartographiée répond **`200` avec une tuile transparente**
+  (et non `404`) : Leaflet garde l'affichage stable au lieu de faire
+  disparaître des morceaux quand on dézoome, et une erreur de rendu renvoie la
+  tuile vide plutôt qu'un `500`.
 
 L'ancienne interface canvas (isométrique 3D + relief) reste disponible sur
 `/index.html`.

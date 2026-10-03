@@ -351,12 +351,27 @@ function sendPng(res, buffer, width, height) {
   res.end(buffer);
 }
 
-/** Tuile de carte : cache public (le contenu ne change qu'avec `rev`). */
-function sendTile(res, buffer) {
+/**
+ * Tuile de carte.
+ *
+ * Le contenu change des qu'un chunk arrive : on ne peut pas mettre en cache
+ * longtemps cote navigateur (une tuile vide resterait vide a l'ecran). On
+ * etiquette donc la reponse avec la revision du store et on repond 304 tant
+ * qu'aucun chunk n'a bouge.
+ */
+function sendTile(req, res, buffer, rev) {
+  const etag = '"r' + rev + '"';
+  res.setHeader("ETag", etag);
+  res.setHeader("Cache-Control", "no-cache");
+  if (req.headers["if-none-match"] === etag) {
+    res.writeHead(304, { "Access-Control-Allow-Origin": "*" });
+    res.end();
+    return;
+  }
   res.writeHead(200, {
     "Content-Type": "image/png",
     "Content-Length": buffer.length,
-    "Cache-Control": "public, max-age=3600",
+    "Cache-Control": "no-cache",
     "Access-Control-Allow-Origin": "*",
   });
   res.end(buffer);
@@ -530,6 +545,11 @@ function createApp(options = {}) {
   // Cache des tuiles : vide des qu'un nouveau chunk arrive.
   const tileCache = new Map();
   let tileCacheRev = -1;
+  // Tuile vide (transparente) : renvoyee 200 au lieu d'un 404 pour une zone
+  // non cartographiee. Leaflet recupere les tuiles de chaque niveau de zoom ;
+  // un 404 fait disparaitre le morceau et la carte semble se vider quand on
+  // dezoome, alors qu'une tuile transparente garde l'affichage stable.
+  let emptyTile = null;
 
   const server = http.createServer(async (req, res) => {
     applyCors(res);
@@ -757,7 +777,7 @@ function createApp(options = {}) {
         }
         const cached = tileCache.get(key);
         if (cached) {
-          sendTile(res, cached);
+          sendTile(req, res, cached, store.rev);
           return;
         }
         const blocks = blocksPerTile(zoom);
@@ -765,19 +785,28 @@ function createApp(options = {}) {
         const cz0 = Math.floor((ty * blocks) / 16);
         const cx1 = Math.floor((tx * blocks + blocks - 1) / 16);
         const cz1 = Math.floor((ty * blocks + blocks - 1) / 16);
-        const tile = renderTilePng(store.range(dim, cx0, cz0, cx1, cz1), {
-          zoom: zoom,
-          tx: tx,
-          ty: ty,
-        });
+        let tile = null;
+        try {
+          tile = renderTilePng(store.range(dim, cx0, cz0, cx1, cz1), {
+            zoom: zoom,
+            tx: tx,
+            ty: ty,
+          });
+        } catch (err) {
+          // Une tuile ne doit jamais casser la carte : on trace et on renvoie
+          // la tuile vide plutot qu'une erreur 500.
+          console.warn(`[map] tuile ${dim}/${zoom}/${tx}/${ty} impossible : ${err.message}`);
+        }
         if (!tile) {
-          // Zone non cartographiee : Leaflet gere le 404 (pas de tuile).
-          sendJson(res, 404, { error: "tuile vide" });
+          if (!emptyTile) {
+            emptyTile = encodePng(TILE_SIZE, TILE_SIZE, Buffer.alloc(TILE_SIZE * TILE_SIZE * 4));
+          }
+          sendTile(req, res, emptyTile, store.rev);
           return;
         }
         if (tileCache.size > 4096) tileCache.clear();
         tileCache.set(key, tile.buffer);
-        sendTile(res, tile.buffer);
+        sendTile(req, res, tile.buffer, store.rev);
         return;
       }
 

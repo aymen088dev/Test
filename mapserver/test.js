@@ -9,7 +9,7 @@ const { normalizeDimension, chunksFromMipmap, playersFromMipmap } = require("./m
 const { encodePng, decodePng } = require("./png");
 const { renderReliefPng } = require("./relief");
 const { blockColor } = require("./public/blocks");
-const { scaledTexture } = require("./textures");
+const { scaledTexture, resolveFile } = require("./textures");
 
 /** Chunk uniforme : toutes les colonnes a la hauteur `y` (herbe). */
 function flatChunk(cx, cz, y) {
@@ -511,8 +511,68 @@ async function main() {
       " attendu " + expectedTile.join(",")
   );
 
+  // Revalidation : la tuile est etiquetee par la revision du store, donc le
+  // navigateur ne garde pas une tuile vide alors que des chunks sont arrives.
+  const revalidate = await fetch(mipBase + "/api/tiles/Overworld/4/0/0");
+  const etag = revalidate.headers.get("etag");
+  assert.ok(etag, "tuile etiquetee (ETag)");
+  assert.strictEqual(revalidate.headers.get("cache-control"), "no-cache");
+  const notModified = await fetch(mipBase + "/api/tiles/Overworld/4/0/0", {
+    headers: { "If-None-Match": etag },
+  });
+  assert.strictEqual(notModified.status, 304, "tuile inchangee -> 304");
+
+  // Coordonnees negatives : le chunk (-1,-1) doit alimenter la tuile (-1,-1)
+  // (l'ancienne cle de chunk faisait se recouvrir cz = -1 et cz = 255).
+  const negFlatBlocks = [];
+  for (let i = 0; i < 256; i++) {
+    negFlatBlocks.push({
+      name: "minecraft:grass_block",
+      coordinates: [(i % 16) - 16, 64, Math.floor(i / 16) - 16],
+    });
+  }
+  r = await req(mipBase, "/api/chunks-data", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chunk: { dimension: "Overworld", blocks: negFlatBlocks } }),
+  });
+  assert.strictEqual(r.status, 200, "chunk en coordonnees negatives accepte");
+
+  const negTile = await fetch(mipBase + "/api/tiles/Overworld/4/-1/-1");
+  assert.strictEqual(negTile.status, 200, "tuile negative servie");
+  const negImg = decodePng(Buffer.from(await negTile.arrayBuffer()));
+  assert.strictEqual(pixelAt(negImg, 8, 8)[3], 255, "tuile negative opaque");
+
+  // Hors zone : tuile transparente en 200 (et non 404) pour que la carte ne
+  // se vide pas quand on dezoome.
   const emptyTile = await fetch(mipBase + "/api/tiles/Overworld/4/500/500");
-  assert.strictEqual(emptyTile.status, 404, "tuile hors zone -> 404");
+  assert.strictEqual(emptyTile.status, 200, "tuile hors zone -> 200 transparente");
+  assert.strictEqual(emptyTile.headers.get("content-type"), "image/png");
+  const emptyImg = decodePng(Buffer.from(await emptyTile.arrayBuffer()));
+  assert.strictEqual(emptyImg.width, 256, "tuile vide 256 px");
+  assert.strictEqual(pixelAt(emptyImg, 128, 128)[3], 0, "tuile vide transparente");
+
+  // Banque de textures : blocs derives resolus + repli couleur (plus de magenta).
+  assert.strictEqual(resolveFile("minecraft:oak_fence"), "oak_planks", "cloture -> planches");
+  assert.strictEqual(
+    resolveFile("minecraft:cobblestone_wall"),
+    "cobblestone",
+    "mur -> pierre taillee"
+  );
+  assert.strictEqual(
+    resolveFile("minecraft:purple_stained_glass_pane"),
+    "purple_stained_glass",
+    "vitre teintee -> verre teinte"
+  );
+  assert.strictEqual(resolveFile("minecraft:melon"), "melon_block", "melon -> bloc de melon");
+  const unknownTex = scaledTexture("minecraft:pas_un_bloc_connu", 16);
+  assert.ok(
+    !(unknownTex[0] === 255 && unknownTex[1] === 0 && unknownTex[2] === 255),
+    "bloc inconnu : couleur du bloc, pas magenta (" +
+      [unknownTex[0], unknownTex[1], unknownTex[2]].join(",") +
+      ")"
+  );
+  assert.strictEqual(unknownTex[3], 255, "texture de repli opaque");
 
   // Joueurs : forme attendue par le front MipMap + visage 8x8 depuis le skin.
   const skinHex = Buffer.alloc(64 * 64 * 4, 200).toString("hex");

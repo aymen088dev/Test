@@ -26,6 +26,14 @@ const MIN_ZOOM = 0;
 const BLOCKS_AT_MAX_ZOOM = 16;
 const DEFAULT_EXAGGERATION = Number(process.env.MAP_RELIEF_EXAGGERATION || 1);
 
+const CHUNK_OFFSET = 1 << 19; // demi-fenetre : ±524288 chunks
+const CHUNK_SPAN = 1 << 20;
+
+/** Cle numerique (cx, cz) sans collision, y compris en negatif. */
+function chunkKey(cx, cz) {
+  return (cx + CHUNK_OFFSET) * CHUNK_SPAN + (cz + CHUNK_OFFSET);
+}
+
 /** Nombre de blocs couverts par une tuile a ce zoom (16 .. 256). */
 function blocksPerTile(zoom) {
   return BLOCKS_AT_MAX_ZOOM * Math.pow(2, MAX_ZOOM - zoom);
@@ -61,9 +69,12 @@ function renderTilePng(chunks, options = {}) {
   const bz0 = ty * blocks;
 
   // Index des chunks fournis : coordonnees de chunk -> payload.
+  // Cle numerique sans collision sur ±524288 chunks (±8,4 M de blocs), donc
+  // valable aussi pour les coordonnees negatives (l'ancien `& 0xff` faisait
+  // se recouvrir cz = -1 et cz = 255, d'ou des tuiles fausses ou vides).
   const byChunk = new Map();
   for (const chunk of chunks) {
-    if (chunk) byChunk.set((chunk.cx << 8) + (chunk.cz & 0xff), chunk);
+    if (chunk) byChunk.set(chunkKey(chunk.cx, chunk.cz), chunk);
   }
 
   const width = blocks;
@@ -77,7 +88,7 @@ function renderTilePng(chunks, options = {}) {
     const bz = bz0 + iz;
     for (let ix = 0; ix < blocks; ix++) {
       const bx = bx0 + ix;
-      const chunk = byChunk.get((Math.floor(bx / CHUNK) << 8) + (Math.floor(bz / CHUNK) & 0xff));
+      const chunk = byChunk.get(chunkKey(Math.floor(bx / CHUNK), Math.floor(bz / CHUNK)));
       if (!chunk || !Array.isArray(chunk.cells)) continue;
       const cell = chunk.cells[((bz & 15) << 4) | (bx & 15)];
       if (!cell || cell.length < 2) continue;
