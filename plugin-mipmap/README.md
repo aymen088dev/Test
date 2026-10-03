@@ -1,0 +1,96 @@
+# plugin-mipmap — MipMap pour Endstone 0.11
+
+Plugin **MipMap** ([MipaSenpai/MipMap](https://github.com/MipaSenpai/MipMap),
+licence MIT — voir `LICENSE`) porté sur **Endstone 0.11**, branché sur le
+`mapserver/` de ce dépôt.
+
+C'est **le plugin carte du dépôt** : il remplace l'ancien `plugin-worldmap/`
+(scanner maison). Pourquoi ce choix :
+
+* il est maintenu, testé, et couvre ce que le nôtre ne faisait pas
+  (joueurs + skins, `/loadmap` pour pré-générer une zone) ;
+* il s'accroche à `ChunkLoadEvent` : la carte se remplit **exactement** des
+  chunks que BDS a réellement chargés — c'est la cause des cartes vides qu'on
+  avait (4 225 chunks vides) ;
+* son protocole est un simple POST JSON, que `mapserver/` parle déjà.
+
+## Installation
+
+```bash
+sh ./build.sh          # produit dist/endstone_mipmap-1.0.3-py3-none-any.whl
+```
+
+Copie la `.whl` dans le dossier `plugins/` du serveur Endstone, puis redémarre.
+Le plugin crée `plugins/mipmap/config.toml` au premier lancement.
+
+> **Dépendance** : `aiohttp` (déclarée dans `pyproject.toml`). Le bundle
+> officiel Endstone installe les dépendances de la `.whl` tout seul ; sinon
+> `pip install aiohttp`.
+
+## Configuration (`plugins/mipmap/config.toml`)
+
+```toml
+sendPlayers = true
+
+[api]
+chunks  = "http://<IP_DU_MAPSERVER>:10015/api/chunks-data"
+players = "http://<IP_DU_MAPSERVER>:10015/api/players-data"
+```
+
+Si le mapserver est verrouillé avec `MAP_MIPMAP_TOKEN`, ajoute la clé dans
+l'URL (le plugin n'envoie **aucun header** d'authentification) :
+
+```toml
+chunks  = "http://<IP>:10015/api/chunks-data?key=<TOKEN>"
+players = "http://<IP>:10015/api/players-data?key=<TOKEN>"
+```
+
+**Le plugin exige une réponse HTTP 200** : tout autre code est journalisé
+(`[Mipmap] HTTP error <status> for chunk (x, z)`) et le chunk est perdu.
+Le mapserver répond 200 dès qu'un chunk contient au moins un bloc valide.
+
+## Commandes
+
+| Commande | Effet |
+|---|---|
+| `/loadmap` | pré-génère la zone par défaut (`mapLoading.defaultArea`) |
+| `/loadmap <minX> <minZ> <maxX> <maxZ>` | pré-génère une zone précise |
+| `/loadmap status` | progression du chargement |
+| `/loadmap help` | aide |
+
+Permission : `mipmap.command.loadmap` (défaut `console`, alias `lm`).
+Le pré-chargement passe par des `tickingarea` temporaires : c'est ce qui force
+BDS à charger les chunks et donc à déclencher `ChunkLoadEvent`.
+
+## Ce que le port 0.11 change (et pourquoi)
+
+| Correctif | Raison |
+|---|---|
+| `Block.type` lu comme chaîne | Endstone 0.11 expose `Block.type` en `str` ; l'amont attendait un objet `BlockType` |
+| Blacklist filtrée | l'amont contient des entrées `"minecraft:poppy.png"` (restes de la table de textures) qui ne filtraient rien ; elles sont retirées du `config.toml` par défaut |
+| Blacklist appliquée aussi à l'air | une colonne dont la surface est de l'air descend maintenant jusqu'au sol |
+| `BatchTracker` créé dans `on_load` | l'amont le créait dans `on_enable`, donc `/loadmap` plantait avant |
+| Messages tolérants | une clé retirée du `config.toml` ne lève plus d'`AttributeError` |
+| `try/except` autour des skins | une skin indisponible ne fait plus échouer l'envoi des joueurs |
+
+Le reste du plugin (envoi `aiohttp`, batch tracker, tickingareas) est celui de
+l'amont, inchangé.
+
+## Tests
+
+```bash
+python3 test_pipeline.py
+```
+
+Le test installe des doublures `endstone` dans `sys.modules`, appelle le **vrai**
+`_getChunkData()` avec de faux blocs 0.11, puis POSTe le payload au **vrai**
+mapserver Node (lancé sur un port libre, fichier de persistance temporaire) et
+vérifie le 200, le chunk stocké et le joueur. 18 vérifications, `exit 0` si tout
+passe.
+
+## Limites
+
+* Pas de serveur Bedrock ici : `ChunkLoadEvent`, `tickingarea` et `aiohttp` ne
+  sont pas exercés en conditions réelles, seulement le format et l'API 0.11.
+* Le `api_version` du plugin est passé à `"0.11"` ; sur un serveur Endstone
+  0.10 il faut le remettre à `"0.10"`.

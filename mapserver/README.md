@@ -5,11 +5,13 @@ Endstone et sert une **carte isométrique 3D** dans le navigateur (style BlueMap
 
 Deux sources de données sont acceptées :
 
-* **`plugin-worldmap/`** — plugin maison, envoi un chunk à la fois sur
-  `POST /api/chunk` (header `X-Api-Key`).
-* **[MipMap](https://github.com/MipaSenpai/MipMap)** — plugin communautaire,
-  paiement des chunks et des joueurs sur `POST /api/chunks-data` et
+* **`plugin-mipmap/`** — **le plugin carte du dépôt** :
+  [MipMap](https://github.com/MipaSenpai/MipMap) porté sur Endstone 0.11. Il
+  envoie les chunks sur `POST /api/chunks-data` et les joueurs sur
   `POST /api/players-data`. Voir [Compatibilité MipMap](#compatibilité-mipmap).
+* **Format interne** (`POST /api/chunk`, header `X-Api-Key`) — pour un plugin
+  maison ou un import manuel : un chunk = `{v, dim, cx, cz, depth, palette,
+  cells}`.
 
 ## Démarrage
 
@@ -24,6 +26,38 @@ Aucune étape `npm install` : il n'y a **aucune dépendance**.
 Sur **Pterodactyl (egg Node.js)** : mets le dossier `mapserver/` à la racine de
 l'instance, commande de démarrage `node server.js`, variable `PORT` fixée par le
 panel (ici `10015`).
+
+## Serveur Minecraft et mapserver sur des machines différentes
+
+Le plugin doit pouvoir faire un `POST` vers le mapserver : c'est la **seule**
+contrainte. Trois cas :
+
+| Situation | URL à mettre dans `config.toml` |
+|---|---|
+| Même instance Pterodactyl (mapserver lancé dans le même conteneur) | `http://127.0.0.1:10015/api/chunks-data` |
+| Deux instances Pterodactyl **sur le même node** | `http://<IP_DU_NODE>:<PORT_ALLOCATION>/api/chunks-data` |
+| Mapserver ailleurs (VPS, PC perso, Docker…) | `http://<IP_PUBLIQUE>:10015/api/chunks-data` |
+
+⚠️ **`127.0.0.1` ne marche que dans le même conteneur.** Deux serveurs
+Pterodactyl sont deux conteneurs séparés : depuis le serveur Minecraft,
+`127.0.0.1` désigne *son propre* conteneur, pas le node. Il faut l'IP du node et
+l'allocation du serveur mapserver (visible dans l'onglet *Network* du panel).
+
+Côté mapserver :
+
+* il écoute déjà `0.0.0.0` (`HOST` par défaut) — ne pas mettre `127.0.0.1` ;
+* mets `PORT` sur la **valeur de l'allocation** Pterodactyl, sinon le panel ne
+  route pas le trafic ;
+* pas de dépendance : seul le port TCP du mapserver doit être ouvert.
+
+Test depuis le serveur Minecraft (ou n'importe où) :
+
+```bash
+curl http://<IP_DU_MAPSERVER>:10015/api/status
+```
+
+Si ça répond, le plugin répondra aussi. Sinon c'est le réseau (IP, port,
+firewall, allocation), pas le code.
 
 ## Variables d'environnement
 
@@ -86,13 +120,14 @@ chunks négatifs.
 
 ### Configuration du plugin
 
-Dans `plugins/MipMap/config.toml` :
+Dans `plugins/mipmap/config.toml` :
 
 ```toml
-[api]
-chunks = "http://<IP_DU_SERVEUR>:10015/api/chunks-data"
-players = "http://<IP_DU_SERVEUR>:10015/api/players-data"
 sendPlayers = true
+
+[api]
+chunks = "http://151.240.30.8:10015/api/chunks-data"
+players = "http://151.240.30.8:10015/api/players-data"
 ```
 
 Si `MAP_MIPMAP_TOKEN` est défini côté serveur, ajoute la clé dans l'URL
@@ -108,8 +143,9 @@ players = "http://<IP_DU_SERVEUR>:10015/api/players-data?key=<TOKEN>"
 répond `200` uniquement si le chunk contient au moins un bloc valide, `400` pour
 du JSON illisible et `422` pour un payload vide ou invalide.
 
-Le MipMap d'amont déclare `api_version = "0.10"` (Endstone 0.10) ; le format
-d'échange n'a pas changé, le plugin fonctionne sur Endstone 0.11.
+Le plugin livré dans `plugin-mipmap/` est le MipMap d'amont porté sur
+**Endstone 0.11** (voir son README pour la liste des correctifs). Le format
+d'échange est inchangé, donc un MipMap 0.10 d'origine écrit aussi sur ce serveur.
 
 Les joueurs sont mémorisés **30 secondes** (`MAP_PLAYER_TTL_MS`) après leur
 dernier envoi, puis retirés automatiquement — comme ça les marqueurs disparaissent

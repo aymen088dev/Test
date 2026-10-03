@@ -5,8 +5,11 @@ serveur/data/
 # Python
 __pycache__/
 *.pyc
+# Artefacts de build des plugins (regenerables avec build.sh)
+plugin-mipmap/dist/
+plugin-webui/dist/
 
 # Carte : donnees runtime + deps Node
 mapserver/data/
 mapserver/node_modules/
-plugin-worldmap/_tmp_data.ndjson
+
