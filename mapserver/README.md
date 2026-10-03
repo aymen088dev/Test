@@ -78,7 +78,7 @@ firewall, allocation), pas le code.
 | `MAP_DATA_FILE` | `data/chunks.ndjson` | fichier de persistance |
 | `MAP_TILE_CHUNKS` | `8` | taille d'une tuile en chunks |
 | `MAP_RELIEF_MAX_SIDE` | `4096` | côté max (px) de l'image de relief |
-| `MAP_RELIEF_EXAGGERATION` | `1.5` | exagération verticale du relief |
+| `MAP_RELIEF_EXAGGERATION` | `1` | exagération des écarts de hauteur dans l'ombrage (`1` = MipMap) |
 
 **Configure la clé d'API** et mets la même valeur dans `api_key` du plugin :
 sinon n'importe qui peut écrire sur ta carte.
@@ -177,9 +177,18 @@ serveur à partir des chunks stockés :
    surface + couleur), bornée par l'étendue de la dimension. Si le monde dépasse
    `MAP_RELIEF_MAX_SIDE` / 12 M pixels, la grille est sous-échantillonnée
    (hauteur maximale conservée) pour garder un fichier raisonnable.
-2. La grille est **éclairée** comme une carte de relief : normale calculée par
-   gradient, lumière fixe au **nord-ouest** (azimut ~315°), légère teinte
-d'altitude. Les zones non cartographiées restent transparentes.
+2. La grille est **éclairée avec la recette de MipMap** (`webmap/services/tileGenerator.py`) :
+   * teinte d'altitude par bandes : assombri + voile **bleu** sous le niveau de
+     la mer (Y = 63), ×0.9 jusqu'à Y = 100, de plus en plus clair vers les
+     sommets, voile **blanc** au-dessus de Y = 200 ;
+   * **occlusion ambiante** sur les 8 voisins (un voisin plus haut assombrit) ;
+   * **éclairage directionnel** depuis le **nord-ouest** (3 voisins) ;
+   * **courbes de niveau** tous les 20 blocs (voile noir, alpha 30).
+   Les zones non cartographiées restent transparentes.
+
+   MipMap recouvre chaque bloc de sa texture 16×16 et travaille en 16 px/bloc
+   avec une pyramide de zoom ; ici on reste en 1 px/bloc dans un seul PNG, la
+   couleur vient de `public/blocks.js`, mais l'éclairement suit la même formule.
 3. `png.js` encode le résultat en PNG RGBA avec le `zlib` **intégré à Node** :
    aucune dépendance n'est ajoutée (pas de canvas, pas de sharp).
 
@@ -193,7 +202,7 @@ prend quelques instants (les suivantes sont servies depuis le cache).
 ## Tests
 
 ```bash
-npm test        # 24 assertions : auth, API, statique, persistance, protocole MipMap, relief
+npm test        # 25 scénarios : auth, API, statique, persistance, protocole MipMap, relief + ombrage
 ```
 
 ## Interface

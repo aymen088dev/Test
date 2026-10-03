@@ -4,10 +4,82 @@ const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const zlib = require("zlib");
 const { createApp, MapStore } = require("./server");
 const { normalizeDimension, chunksFromMipmap, playersFromMipmap } = require("./mipmap");
 const { encodePng } = require("./png");
 const { renderReliefPng } = require("./relief");
+const { blockColor } = require("./public/blocks");
+
+/** Chunk uniforme : toutes les colonnes a la hauteur `y` (herbe). */
+function flatChunk(cx, cz, y) {
+  const cells = new Array(256);
+  for (let i = 0; i < 256; i++) cells[i] = [y, 0];
+  return {
+    v: 1,
+    dim: "overworld",
+    cx: cx,
+    cz: cz,
+    depth: 1,
+    palette: ["minecraft:grass_block"],
+    cells: cells,
+  };
+}
+
+/**
+ * Decode un PNG RGBA produit par `encodePng` (filtres None puis Up).
+ * Retourne { width, height, data } avec 4 octets par pixel.
+ */
+function decodePng(png) {
+  let pos = 8;
+  let width = 0;
+  let height = 0;
+  const idat = [];
+  while (pos < png.length) {
+    const len = png.readUInt32BE(pos);
+    const type = png.toString("latin1", pos + 4, pos + 8);
+    const data = png.subarray(pos + 8, pos + 8 + len);
+    if (type === "IHDR") {
+      width = data.readUInt32BE(0);
+      height = data.readUInt32BE(4);
+    }
+    if (type === "IDAT") idat.push(data);
+    pos += 12 + len;
+  }
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  const stride = width * 4;
+  const out = Buffer.alloc(stride * height);
+  let prev = Buffer.alloc(stride);
+  for (let y = 0; y < height; y++) {
+    const off = y * (stride + 1);
+    const filter = raw[off];
+    const row = raw.subarray(off + 1, off + 1 + stride);
+    const cur = out.subarray(y * stride, (y + 1) * stride);
+    if (filter === 0) row.copy(cur);
+    else if (filter === 2) {
+      for (let i = 0; i < stride; i++) cur[i] = (row[i] + prev[i]) & 0xff;
+    } else assert.fail("filtre PNG non supporte : " + filter);
+    prev = cur;
+  }
+  return { width: width, height: height, data: out };
+}
+
+function pixelAt(img, x, z) {
+  const o = (z * img.width + x) * 4;
+  return [img.data[o], img.data[o + 1], img.data[o + 2], img.data[o + 3]];
+}
+
+function rgbOf(hex) {
+  return [
+    parseInt(hex.slice(1, 3), 16),
+    parseInt(hex.slice(3, 5), 16),
+    parseInt(hex.slice(5, 7), 16),
+  ];
+}
+
+function near(actual, expected, tol = 1) {
+  return actual.every((v, i) => Math.abs(v - expected[i]) <= tol);
+}
 
 function sampleChunk(cx, cz) {
   const cells = [];
@@ -351,11 +423,74 @@ async function main() {
   assert.strictEqual(synthetic.height, 16, "un chunk = 16 px");
   assert.ok(synthetic.buffer.length > 100, "PNG de relief non vide");
 
+  // 25. ombrage "facon MipMap" : bandes d'altitude, voile bleu, blanchiment,
+  //     courbes de niveau. On decode le PNG et on compare a la formule exacte.
+  const shadePng = renderReliefPng([
+    flatChunk(0, 0, 64), // plaine (< 100 -> x0.9)
+    flatChunk(1, 0, -64), // fond marin (profondeur max -> sombre + bleu)
+    flatChunk(2, 0, 210), // montagne (> 150 -> clair + neige)
+    flatChunk(0, 1, 80), // sur une courbe de niveau (tous les 20 blocs)
+    flatChunk(1, 1, 81), // meme altitude, hors courbe
+  ]);
+  const shadeImg = decodePng(shadePng.buffer);
+  const grass = rgbOf(blockColor("minecraft:grass_block"));
+  assert.strictEqual(shadeImg.width, 48, "monde 3x2 chunks = 48 px de large");
+  assert.strictEqual(shadeImg.height, 32, "monde 3x2 chunks = 32 px de haut");
+
+  // 25a. plaine plate a y=64 : bande < 100 -> base x 0.9, AO/lumiere neutres
+  const plainPx = pixelAt(shadeImg, 8, 8);
+  assert.ok(
+    near(plainPx.slice(0, 3), grass.map((c) => Math.floor(c * 0.9))) && plainPx[3] === 255,
+    "plaine y=64 = couleur de base x 0.9, obtenu " + plainPx.join(",")
+  );
+
+  // 25b. fond marin y=-64 : x0.3 + voile bleu (0,30,80,40) de MipMap
+  const alpha = 40 / 255;
+  const deepNoTint = Math.floor(grass[2] * 0.3 * (1 - alpha));
+  const deepExpected = [
+    Math.floor(grass[0] * 0.3 * (1 - alpha)),
+    Math.floor(grass[1] * 0.3 * (1 - alpha) + 30 * alpha),
+    Math.floor(grass[2] * 0.3 * (1 - alpha) + 80 * alpha),
+  ];
+  const deepPx = pixelAt(shadeImg, 24, 8);
+  assert.ok(
+    near(deepPx.slice(0, 3), deepExpected),
+    "fond marin y=-64 = formule bleue, obtenu " + deepPx.join(",") +
+      " attendu " + deepExpected.join(",")
+  );
+  assert.ok(deepPx[2] > deepNoTint + 4, "le fond marin est bien tire vers le bleu : b=" + deepPx[2] + " vs sans teinte " + deepNoTint);
+
+  // 25c. montagne y=210 : 1.2 + (h-150)/170 x 0.3 + voile blanc
+  const mountainBright = 1.2 + ((210 - 150) / (320 - 150)) * 0.3;
+  const snow = Math.min(((210 - 150) / (320 - 150)) * 0.4, 0.4);
+  const snowA = Math.min(snow * 0.3, 0.3);
+  const mountainExpected = grass.map((c) =>
+    Math.floor(c * mountainBright * (1 - snowA) + 255 * snowA)
+  );
+  const mountainPx = pixelAt(shadeImg, 40, 8);
+  assert.ok(
+    near(mountainPx.slice(0, 3), mountainExpected),
+    "montagne y=210 = formule altitude, obtenu " + mountainPx.join(",") +
+      " attendu " + mountainExpected.join(",")
+  );
+  assert.ok(mountainPx[0] > plainPx[0], "la montagne est plus claire que la plaine");
+
+  // 25d. courbe de niveau (y=80) plus foncee que y=81, meme couleur
+  const contourPx = pixelAt(shadeImg, 4, 24);
+  const noContourPx = pixelAt(shadeImg, 20, 24);
+  assert.ok(
+    contourPx[0] < noContourPx[0] && contourPx[1] < noContourPx[1],
+    "courbe de niveau y=80 plus foncee que y=81 : " +
+      contourPx.slice(0, 3).join(",") +
+      " < " +
+      noContourPx.slice(0, 3).join(",")
+  );
+
   mipmapApp.server.close();
   await mipmapApp.store.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 
-  console.log("OK - 24 assertions passees");
+  console.log("OK - 25 scenarios passes");
 }
 
 main().catch((err) => {
