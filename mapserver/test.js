@@ -601,6 +601,39 @@ async function main() {
   assert.strictEqual(missing.length, 0, "chaque bloc de la table a une texture : " + missing.slice(0, 5));
   const textureFiles = fs.readdirSync(path.join(__dirname, "assets", "textures", "blocks"));
   assert.ok(textureFiles.length > 1700, "banque de textures etendue (" + textureFiles.length + " fichiers)");
+
+  // Textures "masque" du pack Bedrock : grises dans le fichier, teintees par
+  // le moteur. Sans teinte on obtenait de l'eau GRISE ; on applique donc la
+  // couleur par defaut du jeu (eau bleue, herbe verte, feuillage, redstone).
+  const channelAvg = (block) => {
+    const data = scaledTexture(block, 16);
+    let r = 0;
+    let g = 0;
+    let b = 0;
+    for (let i = 0; i < 256; i++) {
+      r += data[i * 4];
+      g += data[i * 4 + 1];
+      b += data[i * 4 + 2];
+    }
+    return [r / 256, g / 256, b / 256];
+  };
+
+  const waterAvg = channelAvg("minecraft:water");
+  assert.ok(
+    waterAvg[2] > waterAvg[0] + 40 && waterAvg[2] > waterAvg[1],
+    "eau bleue (et non grise), obtenu " + waterAvg.map(Math.round).join(",")
+  );
+  const grassAvg = channelAvg("minecraft:grass");
+  assert.ok(
+    grassAvg[1] > grassAvg[0] && grassAvg[1] > grassAvg[2],
+    "herbe verte, obtenu " + grassAvg.map(Math.round).join(",")
+  );
+  const stoneAvg = channelAvg("minecraft:stone");
+  assert.strictEqual(
+    Math.round(Math.max(...stoneAvg) - Math.min(...stoneAvg)),
+    0,
+    "la pierre reste grise (on ne teinte pas tout)"
+  );
   const unknownTex = scaledTexture("minecraft:pas_un_bloc_connu", 16);
   assert.ok(
     !(unknownTex[0] === 255 && unknownTex[1] === 0 && unknownTex[2] === 255),

@@ -250,6 +250,11 @@ lumière nord-ouest, courbes de niveau. Particularités de ce port :
   couvre 256 blocs à 1 px/bloc : la tuile est rendue **directement** à la
   résolution demandée (pas de pyramide pré-générée comme `zoomGenerator.py`) ;
 * les textures animées (bandes 16×64…) ne gardent que la **première image** ;
+* certaines textures du pack Bedrock sont des **masques gris** que le moteur
+  teinte lui-même (eau, herbe, feuillage, poudre de redstone). On leur applique
+  la couleur par défaut du jeu (`textures.js`) : l'eau est bleue et non grise,
+  l'herbe verte, la redstone rouge — sans toucher aux blocs vraiment gris
+  (pierre, fer…) ;
 * pour les blocs absents de la table Bedrock, le bloc est résolu vers son
   matériau de base (`oak_fence` → planches, `*_wall` → pierre,
   `*_glass_pane` → verre teinté…), et à défaut peint avec la **couleur du bloc**

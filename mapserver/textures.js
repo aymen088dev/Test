@@ -52,6 +52,41 @@ const ALIASES = {
   torchfire: "torch",
 };
 
+/*
+ * Teintes des textures "masque" (grises) du pack Bedrock.
+ *
+ * Certaines textures ne sont pas colorées : le moteur les multiplie par une
+ * couleur (eau, herbe, feuilles, poudre de redstone). Prises telles quelles
+ * elles donnent des blocs **gris** (l'eau notamment). On applique donc la
+ * teinte par défaut du jeu (les valeurs classiques : eau #3F76E4, herbe
+ * #91BD59, feuillage #77AB2F, redstone rouge).
+ */
+const WATER_TINT = [63, 118, 228]; // #3F76E4
+const GRASS_TINT = [145, 189, 89]; // #91BD59
+const FOLIAGE_TINT = [119, 171, 47]; // #77AB2F
+const REDSTONE_TINT = [255, 0, 0];
+
+const TINTS = {
+  water_still_grey: WATER_TINT,
+  water_flow_grey: WATER_TINT,
+  grass_top: GRASS_TINT,
+  grass_side_carried: GRASS_TINT,
+  grass_carried_top: GRASS_TINT,
+  tallgrass: GRASS_TINT,
+  tallgrass_carried: GRASS_TINT,
+  double_plant_grass_top: GRASS_TINT,
+  double_plant_fern_top: GRASS_TINT,
+  fern: GRASS_TINT,
+  fern_carried: GRASS_TINT,
+  vine: FOLIAGE_TINT,
+  waterlily: FOLIAGE_TINT,
+  leaf_litter: FOLIAGE_TINT,
+  bush: FOLIAGE_TINT,
+  redstone_dust_cross: REDSTONE_TINT,
+  redstone_dust_line: REDSTONE_TINT,
+  redstone_dust_dot: REDSTONE_TINT,
+};
+
 let available = null; // Map nom sans extension -> nom de fichier
 let bedrockMap = null; // bloc Bedrock -> nom sans extension
 
@@ -157,6 +192,18 @@ function decodeImage(file, buffer) {
   return file.endsWith(".tga") ? decodeTga(buffer) : decodePng(buffer);
 }
 
+/** Multiplie une texture par la teinte du jeu (textures "masque" grises). */
+function applyTint(data, tint) {
+  const out = Buffer.alloc(data.length);
+  for (let i = 0; i < data.length; i += 4) {
+    out[i] = (data[i] * tint[0] + 127) / 255;
+    out[i + 1] = (data[i + 1] * tint[1] + 127) / 255;
+    out[i + 2] = (data[i + 2] * tint[2] + 127) / 255;
+    out[i + 3] = data[i + 3];
+  }
+  return out;
+}
+
 /** Recadre la premiere image d'une texture (bandes animees des texture packs). */
 function firstFrame(img) {
   const w = Math.min(img.width, BLOCK);
@@ -190,6 +237,8 @@ function textureFor(blockName) {
   let data = null;
   try {
     data = firstFrame(decodeImage(file, fs.readFileSync(path.join(TEXTURES_DIR, file))));
+    const tint = TINTS[file.replace(/\.(png|tga)$/, "")];
+    if (tint) data = applyTint(data, tint);
   } catch (err) {
     console.warn(`[map] texture illisible : ${file} (${err.message})`);
   }
