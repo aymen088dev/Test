@@ -83,7 +83,11 @@ class Map(Plugin):
     permissions = {
         "mipmap.command.loadmap": {
             "description": "Permission for map loading control",
-            "default": "console",
+            # L'amont mettait "console" : la commande etait alors IMPOSSIBLE a
+            # lancer en jeu, meme pour un OP. "op" la rend utilisable par les
+            # operateurs, ce qui est le cas d'usage normal. Valeurs possibles
+            # (doc Endstone) : True, False, "op", "not_op", "console".
+            "default": "op",
         }
     }
 

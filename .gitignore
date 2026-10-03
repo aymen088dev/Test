@@ -6,8 +6,9 @@ serveur/data/
 __pycache__/
 *.pyc
 # Artefacts de build des plugins (regenerables avec build.sh)
-plugin-mipmap/dist/
-plugin-webui/dist/
+plugin-mipmap/build/
+plugin-mipmap/src/*.egg-info/
+plugin-webui/build/
 
 # Carte : donnees runtime + deps Node
 mapserver/data/

@@ -248,7 +248,16 @@ def main_test() -> int:
     )
     check("chunkX/chunkZ ajoutes par loadChunk", True)
 
-    print("[3/4] messages de /loadmap : cle manquante ne crashe plus")
+    print("[3/4] /loadmap : permission utilisable en jeu + messages tolerants")
+    # Regression : "console" rendait la commande impossible a lancer en jeu,
+    # meme pour un OP (verifie dans la doc Endstone : True/False/op/not_op/console).
+    default = main.Map.permissions["mipmap.command.loadmap"]["default"]
+    check('permission par defaut = "op"', default == "op", f"recu {default!r}")
+    check(
+        "permission declaree sur la commande",
+        "mipmap.command.loadmap" in main.Map.commands["loadmap"]["permissions"],
+    )
+    check("alias /lm declare", "lm" in main.Map.commands["loadmap"]["aliases"])
     check(
         "message present et formate",
         loadmap.message({"messages": {"a": "x{n}"}}, "a", n=2) == "x2",

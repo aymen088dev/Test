@@ -58,7 +58,12 @@ Le mapserver répond 200 dès qu'un chunk contient au moins un bloc valide.
 | `/loadmap status` | progression du chargement |
 | `/loadmap help` | aide |
 
-Permission : `mipmap.command.loadmap` (défaut `console`, alias `lm`).
+Permission : `mipmap.command.loadmap`, **défaut `op`** (alias `lm`).
+
+> L'amont mettait `"console"`, ce qui rend la commande **impossible à lancer en
+> jeu, même pour un OP**. Valeurs acceptées par Endstone : `True` (tout le
+> monde), `False` (personne), `"op"`, `"not_op"`, `"console"`. Pour autoriser un
+> joueur non-OP, donne-lui la permission `mipmap.command.loadmap`.
 Le pré-chargement passe par des `tickingarea` temporaires : c'est ce qui force
 BDS à charger les chunks et donc à déclencher `ChunkLoadEvent`.
 
