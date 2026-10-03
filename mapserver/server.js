@@ -7,6 +7,8 @@ const path = require("path");
 
 const { chunksFromMipmap, playersFromMipmap, dimensionLabel, normalizeDimension } = require("./mipmap");
 const { renderReliefPng } = require("./relief");
+const { renderTilePng, blocksPerTile, MAX_ZOOM, MIN_ZOOM, TILE_SIZE } = require("./tiles");
+const { encodePng } = require("./png");
 
 // ---------------------------------------------------------------------------
 // CONFIGURATION - modifie directement la cle ici
@@ -26,6 +28,53 @@ const APPEND_FLUSH = 200000;
 const PLAYER_TTL_MS = Number(process.env.MAP_PLAYER_TTL_MS || 30000);
 
 const SEP = "\u0000";
+
+// UI MipMap vendoree (web/ du depot MipMap, MIT) : servie sur "/".
+const MIPMAP_UI_DIR = path.join(__dirname, "public", "mipmap");
+const SKIN_FALLBACK = path.join(__dirname, "assets", "skins", "default.png");
+// Reglages exposes par GET /api/config (comme MipMap core/config.py).
+const MAP_SIZE = Number(process.env.MAP_SIZE || 2000);
+const MAP_UPDATE_INTERVAL = Number(process.env.MAP_UPDATE_INTERVAL || 5000);
+const MAP_DEFAULT_WORLD = process.env.MAP_DEFAULT_WORLD || "Overworld";
+
+/** Nom de monde tel que le front MipMap l'attend (Overworld / Nether / TheEnd). */
+function worldName(dim) {
+  if (dim === "minecraft:overworld") return "Overworld";
+  if (dim === "minecraft:nether") return "Nether";
+  if (dim === "minecraft:the_end") return "TheEnd";
+  const slug = String(dim || "").replace(/^minecraft:/, "");
+  return slug
+    .split(/[_-]+/)
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join("");
+}
+
+/** Visage 8x8 (crop (8,8)-(16,16)) d'un skin MipMap, encode en PNG. */
+function faceFromSkin(skinHex, skinShape) {
+  if (typeof skinHex !== "string" || !Array.isArray(skinShape)) return null;
+  const w = skinShape[0];
+  const h = skinShape[1];
+  const c = skinShape[2];
+  if (![64, 128].includes(w) || !(h === 64 || h === 32 || h === 128) || !(c === 4 || c === 3)) {
+    return null;
+  }
+  const bytes = Buffer.from(skinHex, "hex");
+  if (bytes.length < w * h * c) return null;
+  const FACE = 8;
+  const face = Buffer.alloc(FACE * FACE * 4);
+  for (let y = 0; y < FACE; y++) {
+    for (let x = 0; x < FACE; x++) {
+      const s = ((y + 8) * w + (x + 8)) * c;
+      const o = (y * FACE + x) * 4;
+      face[o] = bytes[s];
+      face[o + 1] = bytes[s + 1];
+      face[o + 2] = bytes[s + 2];
+      face[o + 3] = c === 4 ? bytes[s + 3] : 255;
+    }
+  }
+  return encodePng(FACE, FACE, face);
+}
 
 class MapStore {
   constructor({ dataFile = null, tileChunks = TILE_CHUNKS } = {}) {
@@ -302,6 +351,17 @@ function sendPng(res, buffer, width, height) {
   res.end(buffer);
 }
 
+/** Tuile de carte : cache public (le contenu ne change qu'avec `rev`). */
+function sendTile(res, buffer) {
+  res.writeHead(200, {
+    "Content-Type": "image/png",
+    "Content-Length": buffer.length,
+    "Cache-Control": "public, max-age=3600",
+    "Access-Control-Allow-Origin": "*",
+  });
+  res.end(buffer);
+}
+
 function applyCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Api-Key");
@@ -467,6 +527,9 @@ function createApp(options = {}) {
   // Cache du relief par dimension : evite de re-rendre l'image a chaque
   // rechargement tant qu'aucun nouveau chunk n'est arrive (store.rev).
   const reliefCache = new Map();
+  // Cache des tuiles : vide des qu'un nouveau chunk arrive.
+  const tileCache = new Map();
+  let tileCacheRev = -1;
 
   const server = http.createServer(async (req, res) => {
     applyCors(res);
@@ -551,12 +614,40 @@ function createApp(options = {}) {
       if (pathname === "/api/players") {
         const playersByDim = store.onlinePlayers();
         const out = {};
-        for (const [dim, list] of playersByDim) out[dim] = list;
+        const flat = [];
+        for (const [dim, list] of playersByDim) {
+          out[dim] = list;
+          // Forme attendue par le front MipMap : dimension en nom de monde.
+          for (const p of list) {
+            flat.push({
+              name: p.name,
+              x: p.x,
+              y: p.y,
+              z: p.z,
+              dimension: worldName(dim),
+              skin: "/api/players/" + encodeURIComponent(p.name) + "/skin.png",
+            });
+          }
+        }
         sendJson(res, 200, {
           ok: true,
+          status: "success",
           updated: store.playersSeen || 0,
-          count: Array.from(playersByDim.values()).reduce((n, l) => n + l.length, 0),
+          count: flat.length,
           dimensions: out,
+          players: flat,
+        });
+        return;
+      }
+
+      if (pathname === "/api/config") {
+        sendJson(res, 200, {
+          mapSize: MAP_SIZE,
+          updateInterval: MAP_UPDATE_INTERVAL,
+          defaultWorld: MAP_DEFAULT_WORLD,
+          minZoom: MIN_ZOOM,
+          maxZoom: MAX_ZOOM,
+          tileSize: TILE_SIZE,
         });
         return;
       }
@@ -645,6 +736,84 @@ function createApp(options = {}) {
         return;
       }
 
+      if (parts[0] === "api" && parts[1] === "tiles" && parts.length === 6) {
+        // GET /api/tiles/<world>/<z>/<x>/<y>  ->  tuile PNG (rendu MipMap).
+        const dim = normalizeDimension(parts[2]);
+        const zoom = Number(parts[3]);
+        const tx = Number(parts[4]);
+        const ty = Number(parts[5]);
+        if (![zoom, tx, ty].every((n) => Number.isInteger(n))) {
+          sendJson(res, 400, { error: "coordonnees de tuile invalides" });
+          return;
+        }
+        if (!store.dims.has(dim)) {
+          sendJson(res, 404, { error: "dimension inconnue", dim: dim });
+          return;
+        }
+        const key = dim + SEP + zoom + SEP + tx + SEP + ty;
+        if (tileCacheRev !== store.rev) {
+          tileCache.clear();
+          tileCacheRev = store.rev;
+        }
+        const cached = tileCache.get(key);
+        if (cached) {
+          sendTile(res, cached);
+          return;
+        }
+        const blocks = blocksPerTile(zoom);
+        const cx0 = Math.floor((tx * blocks) / 16);
+        const cz0 = Math.floor((ty * blocks) / 16);
+        const cx1 = Math.floor((tx * blocks + blocks - 1) / 16);
+        const cz1 = Math.floor((ty * blocks + blocks - 1) / 16);
+        const tile = renderTilePng(store.range(dim, cx0, cz0, cx1, cz1), {
+          zoom: zoom,
+          tx: tx,
+          ty: ty,
+        });
+        if (!tile) {
+          // Zone non cartographiee : Leaflet gere le 404 (pas de tuile).
+          sendJson(res, 404, { error: "tuile vide" });
+          return;
+        }
+        if (tileCache.size > 4096) tileCache.clear();
+        tileCache.set(key, tile.buffer);
+        sendTile(res, tile.buffer);
+        return;
+      }
+
+      if (
+        parts[0] === "api" &&
+        parts[1] === "players" &&
+        parts.length === 4 &&
+        parts[3] === "skin.png"
+      ) {
+        const name = parts[2];
+        const player = store.players.get(name);
+        const face = player ? faceFromSkin(player.skin, player.skinShape) : null;
+        if (face) {
+          res.writeHead(200, {
+            "Content-Type": "image/png",
+            "Content-Length": face.length,
+            "Cache-Control": "public, max-age=3600",
+          });
+          res.end(face);
+          return;
+        }
+        fs.readFile(SKIN_FALLBACK, (err, buf) => {
+          if (err) {
+            sendJson(res, 404, { error: "skin introuvable" });
+            return;
+          }
+          res.writeHead(200, {
+            "Content-Type": "image/png",
+            "Content-Length": buf.length,
+            "Cache-Control": "public, max-age=3600",
+          });
+          res.end(buf);
+        });
+        return;
+      }
+
       if (pathname === "/api/chunks") {
         const params = url.searchParams;
         const dim = params.get("dim");
@@ -664,6 +833,15 @@ function createApp(options = {}) {
       }
 
       if (req.method === "GET") {
+        // Interface MipMap vendoree : "/" -> index.html, "/static/*" -> assets.
+        if (pathname === "/" || pathname === "/mipmap") {
+          serveStatic(res, MIPMAP_UI_DIR, "/index.html");
+          return;
+        }
+        if (pathname.startsWith("/static/")) {
+          serveStatic(res, MIPMAP_UI_DIR, pathname);
+          return;
+        }
         serveStatic(res, publicDir, pathname);
         return;
       }
@@ -694,6 +872,10 @@ function main() {
     console.log(
       `[map] routes MipMap : POST /api/chunks-data, /api/players-data` +
         ` (${mipmapToken ? "jeton exige (?key=)" : "ouvertes, sans jeton"})`
+    );
+    console.log(`[map] interface MipMap (Node) : http://${host}:${port}/`);
+    console.log(
+      `[map] tuiles : GET /api/tiles/<monde>/<zoom>/<x>/<y> (textures MipMap, 16 px/bloc)`
     );
     console.log(`[map] relief vu de dessus : GET /api/relief/<dim>`);
     console.log(`[map] chunks en memoire : ${app.store.chunks.size}`);

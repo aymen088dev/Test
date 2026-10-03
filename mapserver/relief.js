@@ -14,10 +14,10 @@
  *   3. éclairage directionnel depuis le nord-ouest (3 voisins) ;
  *   4. courbes de niveau tous les 20 blocs.
  *
- * MipMap recouvre chaque bloc de sa texture 16x16 et travaille donc en
- * 16 px/bloc (tuiles 256 px + pyramide de zoom). Ici on reste en 1 px/bloc
- * dans un seul PNG : la couleur vient de la table `public/blocks.js`, mais
- * l'éclairement suit la même recette.
+ * L'éclairement est partagé avec le rendu des tuiles (`shade.js`). MipMap
+ * recouvre chaque bloc de sa texture 16x16 et travaille en 16 px/bloc avec
+ * une pyramide de zoom ; ici on reste en 1 px/bloc dans un seul PNG, la
+ * couleur vient de la table `public/blocks.js`.
  *
  * Zero dependance : l'encodeur PNG maison s'appuie sur `zlib` (integre a
  * Node).
@@ -25,21 +25,18 @@
 
 const { encodePng } = require("./png");
 const { blockColor } = require("./public/blocks");
+const {
+  SEA_LEVEL,
+  LIGHT,
+  clamp,
+  altitudeShade,
+  surfaceShade,
+} = require("./shade");
 
 const MAX_SIDE = Math.max(256, Number(process.env.MAP_RELIEF_MAX_SIDE || 4096));
 const MAX_PIXELS = 12e6;
 // Exageration verticale des ecarts de hauteur (1 = identique a MipMap).
 const DEFAULT_EXAGGERATION = Number(process.env.MAP_RELIEF_EXAGGERATION || 1);
-
-// Reperes d'altitude, identiques a MipMap (webmap/core + tileGenerator.py).
-const SEA_LEVEL = 63;
-const MIN_HEIGHT = -64;
-const MAX_HEIGHT = 320;
-const CONTOUR_EVERY = 20; // courbes de niveau tous les N blocs
-const CONTOUR_ALPHA = 30; // voile noir (alpha 0..255) pose par MipMap
-
-// Direction de la lumiere : nord-ouest (voisins -x / -z), comme MipMap.
-const LIGHT = [-1, -1];
 
 const rgbCache = new Map();
 
@@ -53,10 +50,6 @@ function hexToRgb(hex) {
   ];
   rgbCache.set(hex, out);
   return out;
-}
-
-function clamp(v, lo, hi) {
-  return v < lo ? lo : v > hi ? hi : v;
 }
 
 /** Bornes de chunks couvertes par une liste de chunks. */
@@ -149,26 +142,7 @@ function buildGrid(chunks) {
   };
 }
 
-/**
- * Teinte d'altitude (bandes de MipMap) :
- *   y < 63  -> assombri + tire vers le bleu (profondeur)
- *   y < 100 -> 0.9
- *   y < 150 -> 0.9 .. 1.1
- *   y >=150 -> 1.2 .. 1.5, blanc au-dessus de 200
- */
-function altitudeShade(h) {
-  if (h < SEA_LEVEL) {
-    const depth = clamp((SEA_LEVEL - h) / (SEA_LEVEL - MIN_HEIGHT), 0, 1);
-    return { brightness: 0.3 + (1 - depth) * 0.5, blue: depth, snow: 0 };
-  }
-  if (h < 100) return { brightness: 0.9, blue: 0, snow: 0 };
-  if (h < 150) return { brightness: 0.9 + ((h - 100) / 50) * 0.2, blue: 0, snow: 0 };
-  const mountain = (h - 150) / (MAX_HEIGHT - 150);
-  const snow = h > 200 ? Math.min(mountain * 0.4, 0.4) : 0;
-  return { brightness: 1.2 + mountain * 0.3, blue: 0, snow: snow };
-}
-
-/** Eclaire la grille (recette MipMap) et renvoie un buffer RGBA. */
+/** Eclaire la grille (recette MipMap partagee) et renvoie un buffer RGBA. */
 function shadeGrid(grid, exaggeration) {
   const width = grid.width;
   const height = grid.height;
@@ -179,25 +153,7 @@ function shadeGrid(grid, exaggeration) {
   const b = grid.b;
   const mask = grid.mask;
   const rgba = Buffer.alloc(width * height * 4);
-
-  const e = exaggeration;
-  const contourFactor = 1 - CONTOUR_ALPHA / 255;
   const blueAlpha = 40 / 255; // voile bleu de MipMap (0, 30, ?, 40)
-
-  // Occlusion ambiante : 8 voisins (dx, dz) autour du pixel.
-  const NEIGH8 = [];
-  for (let dz = -1; dz <= 1; dz++) {
-    for (let dx = -1; dx <= 1; dx++) {
-      if (dx === 0 && dz === 0) continue;
-      NEIGH8.push([dx, dz]);
-    }
-  }
-  // Eclairage directionnel : les 3 voisins du nord-ouest.
-  const NEIGH_LIGHT = [
-    [LIGHT[0], LIGHT[1]],
-    [LIGHT[0], 0],
-    [0, LIGHT[1]],
-  ];
 
   for (let z = 0; z < height; z++) {
     for (let x = 0; x < width; x++) {
@@ -207,70 +163,36 @@ function shadeGrid(grid, exaggeration) {
         rgba[o + 3] = 0; // zone non cartographiee : transparente
         continue;
       }
-      const h = y[i];
-      const band = altitudeShade(h);
+
+      const sh = surfaceShade(grid, x, z, {
+        blocksPerCell: stride,
+        exaggeration: exaggeration,
+      });
 
       // 1. luminosite par altitude
-      let cr = r[i] * band.brightness;
-      let cg = g[i] * band.brightness;
-      let cb = b[i] * band.brightness;
+      let cr = r[i] * sh.brightness;
+      let cg = g[i] * sh.brightness;
+      let cb = b[i] * sh.brightness;
 
       // 2. teinte : bleu sous le niveau de la mer / neige au sommet
-      if (band.blue > 0) {
-        const tintB = band.blue * 80; // profondeur -> bleu
+      if (sh.blue > 0) {
+        const tintB = sh.blue * 80;
         cr = cr * (1 - blueAlpha);
         cg = cg * (1 - blueAlpha) + 30 * blueAlpha;
         cb = cb * (1 - blueAlpha) + tintB * blueAlpha;
-      } else if (band.snow > 0) {
-        const a = Math.min(band.snow * 0.3, 0.3);
+      } else if (sh.snow > 0) {
+        const a = Math.min(sh.snow * 0.3, 0.3);
         cr = cr * (1 - a) + 255 * a;
         cg = cg * (1 - a) + 255 * a;
         cb = cb * (1 - a) + 255 * a;
       }
 
-      // 3. occlusion ambiante sur les 8 voisins
-      let occlusion = 0;
-      let valid = 0;
-      for (let n = 0; n < NEIGH8.length; n++) {
-        const nx = x + NEIGH8[n][0];
-        const nz = z + NEIGH8[n][1];
-        if (nx < 0 || nz < 0 || nx >= width || nz >= height) continue;
-        const ni = nz * width + nx;
-        if (!mask[ni]) continue;
-        const diff = ((y[ni] - h) * e) / stride;
-        if (diff > 0) occlusion += Math.min(diff / 10, 0.15);
-        else if (diff < 0) occlusion -= Math.min(-diff / 20, 0.05);
-        valid += 1;
-      }
-      if (valid > 0) occlusion /= valid;
-      const ao = clamp(1 - occlusion, 0.6, 1.2);
+      // 3. occlusion ambiante + lumiere nord-ouest, 4. courbe de niveau
+      const factor = sh.ao * sh.light * sh.contour;
 
-      // 4. eclairage directionnel nord-ouest
-      let shadow = 0;
-      for (let n = 0; n < NEIGH_LIGHT.length; n++) {
-        const nx = x + NEIGH_LIGHT[n][0];
-        const nz = z + NEIGH_LIGHT[n][1];
-        if (nx < 0 || nz < 0 || nx >= width || nz >= height) continue;
-        const ni = nz * width + nx;
-        if (!mask[ni]) continue;
-        const diff = ((y[ni] - h) * e) / stride;
-        if (diff > 0) shadow += Math.min(diff / 8, 0.2);
-      }
-      const light = Math.max(0.7, 1 - shadow / NEIGH_LIGHT.length);
-
-      const factor = ao * light;
-
-      // 5. courbes de niveau tous les 20 blocs (voile noir, comme MipMap)
-      const isContour = h > MIN_HEIGHT && Math.abs(h % CONTOUR_EVERY) < 1e-6;
-      const contour = isContour ? contourFactor : 1;
-
-      cr = cr * factor * contour;
-      cg = cg * factor * contour;
-      cb = cb * factor * contour;
-
-      rgba[o] = clamp(cr | 0, 0, 255);
-      rgba[o + 1] = clamp(cg | 0, 0, 255);
-      rgba[o + 2] = clamp(cb | 0, 0, 255);
+      rgba[o] = clamp((cr * factor) | 0, 0, 255);
+      rgba[o + 1] = clamp((cg * factor) | 0, 0, 255);
+      rgba[o + 2] = clamp((cb * factor) | 0, 0, 255);
       rgba[o + 3] = 255;
     }
   }

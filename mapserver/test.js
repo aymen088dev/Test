@@ -4,12 +4,12 @@ const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const zlib = require("zlib");
 const { createApp, MapStore } = require("./server");
 const { normalizeDimension, chunksFromMipmap, playersFromMipmap } = require("./mipmap");
-const { encodePng } = require("./png");
+const { encodePng, decodePng } = require("./png");
 const { renderReliefPng } = require("./relief");
 const { blockColor } = require("./public/blocks");
+const { scaledTexture } = require("./textures");
 
 /** Chunk uniforme : toutes les colonnes a la hauteur `y` (herbe). */
 function flatChunk(cx, cz, y) {
@@ -24,44 +24,6 @@ function flatChunk(cx, cz, y) {
     palette: ["minecraft:grass_block"],
     cells: cells,
   };
-}
-
-/**
- * Decode un PNG RGBA produit par `encodePng` (filtres None puis Up).
- * Retourne { width, height, data } avec 4 octets par pixel.
- */
-function decodePng(png) {
-  let pos = 8;
-  let width = 0;
-  let height = 0;
-  const idat = [];
-  while (pos < png.length) {
-    const len = png.readUInt32BE(pos);
-    const type = png.toString("latin1", pos + 4, pos + 8);
-    const data = png.subarray(pos + 8, pos + 8 + len);
-    if (type === "IHDR") {
-      width = data.readUInt32BE(0);
-      height = data.readUInt32BE(4);
-    }
-    if (type === "IDAT") idat.push(data);
-    pos += 12 + len;
-  }
-  const raw = zlib.inflateSync(Buffer.concat(idat));
-  const stride = width * 4;
-  const out = Buffer.alloc(stride * height);
-  let prev = Buffer.alloc(stride);
-  for (let y = 0; y < height; y++) {
-    const off = y * (stride + 1);
-    const filter = raw[off];
-    const row = raw.subarray(off + 1, off + 1 + stride);
-    const cur = out.subarray(y * stride, (y + 1) * stride);
-    if (filter === 0) row.copy(cur);
-    else if (filter === 2) {
-      for (let i = 0; i < stride; i++) cur[i] = (row[i] + prev[i]) & 0xff;
-    } else assert.fail("filtre PNG non supporte : " + filter);
-    prev = cur;
-  }
-  return { width: width, height: height, data: out };
 }
 
 function pixelAt(img, x, z) {
@@ -200,10 +162,14 @@ async function main() {
   assert.strictEqual(r.status, 200);
   assert.strictEqual(r.body.chunks.length, 1);
 
-  // 11. statique
+  // 11. statique : "/" sert l'interface MipMap vendoree, /static ses assets
   r = await req(base, "/");
   assert.strictEqual(r.status, 200, "index servi");
-  assert.ok(String(r.body).includes("<!DOCTYPE html>"));
+  assert.ok(/<!doctype html>/i.test(String(r.body)), "index HTML");
+  assert.ok(String(r.body).includes("static/js/map.js"), "interface MipMap servie");
+
+  r = await req(base, "/static/css/style.css");
+  assert.strictEqual(r.status, 200, "asset MipMap servi");
 
   r = await req(base, "/styles.css");
   assert.strictEqual(r.status, 200);
@@ -486,11 +452,107 @@ async function main() {
       noContourPx.slice(0, 3).join(",")
   );
 
+  // 26. portage MipMap en Node : config, textures, tuiles, joueurs + skins
+  r = await req(mipBase, "/api/config");
+  assert.strictEqual(r.status, 200, "config servie");
+  assert.strictEqual(r.body.defaultWorld, "Overworld");
+  assert.strictEqual(r.body.maxZoom, 4);
+  assert.strictEqual(r.body.tileSize, 256);
+
+  // Le decodeur PNG maison relit une texture vendorée (16x16 RGBA).
+  const grassPng = fs.readFileSync(
+    path.join(__dirname, "assets", "textures", "blocks", "grass_block.png")
+  );
+  const grassImg = decodePng(grassPng);
+  assert.strictEqual(grassImg.width, 16, "texture 16 px de large");
+  assert.strictEqual(grassImg.height, 16, "texture 16 px de haut");
+  assert.strictEqual(grassImg.data.length, 16 * 16 * 4, "texture decodée en RGBA");
+
+  // Une tuile zoom 4 (0,0) rendue depuis un chunk plat d'herbe y=64.
+  const flatBlocks = [];
+  for (let i = 0; i < 256; i++) {
+    flatBlocks.push({
+      name: "minecraft:grass_block",
+      coordinates: [i % 16, 64, Math.floor(i / 16)],
+    });
+  }
+  r = await req(mipBase, "/api/chunks-data", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chunk: { dimension: "Overworld", blocks: flatBlocks } }),
+  });
+  assert.strictEqual(r.status, 200, "chunk plat accepte");
+
+  const tileRes = await fetch(mipBase + "/api/tiles/Overworld/4/0/0");
+  assert.strictEqual(tileRes.status, 200, "tuile servie");
+  assert.strictEqual(tileRes.headers.get("content-type"), "image/png");
+  const tilePng = Buffer.from(await tileRes.arrayBuffer());
+  assert.deepStrictEqual(
+    [...tilePng.subarray(0, 8)],
+    [137, 80, 78, 71, 13, 10, 26, 10],
+    "signature PNG de la tuile"
+  );
+  const tileImg = decodePng(tilePng);
+  assert.strictEqual(tileImg.width, 256, "tuile 256 px");
+  assert.strictEqual(tileImg.height, 256, "tuile 256 px");
+
+  // Pixel (8,8) = bloc (0,0), texture herbe x0.9 (plaine plate, AO/lumiere neutres).
+  const tex = scaledTexture("minecraft:grass_block", 16);
+  const ti = (8 * 16 + 8) * 4; // texture du bloc (0,0), pixel interne (8,8)
+  const expectedTile = [
+    Math.floor(tex[ti] * 0.9),
+    Math.floor(tex[ti + 1] * 0.9),
+    Math.floor(tex[ti + 2] * 0.9),
+  ];
+  const tilePx = pixelAt(tileImg, 8, 8);
+  assert.ok(
+    near(tilePx.slice(0, 3), expectedTile) && tilePx[3] === 255,
+    "tuile = texture du bloc x0.9, obtenu " + tilePx.join(",") +
+      " attendu " + expectedTile.join(",")
+  );
+
+  const emptyTile = await fetch(mipBase + "/api/tiles/Overworld/4/500/500");
+  assert.strictEqual(emptyTile.status, 404, "tuile hors zone -> 404");
+
+  // Joueurs : forme attendue par le front MipMap + visage 8x8 depuis le skin.
+  const skinHex = Buffer.alloc(64 * 64 * 4, 200).toString("hex");
+  r = await req(mipBase, "/api/players-data", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      players: [
+        {
+          name: "Alex",
+          xuid: "1",
+          skin: skinHex,
+          skinShape: [64, 64, 4],
+          dimension: "Overworld",
+          x: 8,
+          y: 64,
+          z: 8,
+        },
+      ],
+    }),
+  });
+  assert.strictEqual(r.status, 200, "joueur accepte");
+
+  r = await req(mipBase, "/api/players");
+  const alex = (r.body.players || []).find((p) => p.name === "Alex");
+  assert.ok(alex, "Alex present dans /api/players");
+  assert.strictEqual(alex.dimension, "Overworld", "dimension en nom de monde");
+  assert.strictEqual(alex.skin, "/api/players/Alex/skin.png");
+
+  const skinRes = await fetch(mipBase + "/api/players/Alex/skin.png");
+  assert.strictEqual(skinRes.status, 200, "skin servi");
+  const face = decodePng(Buffer.from(await skinRes.arrayBuffer()));
+  assert.strictEqual(face.width, 8, "visage 8x8");
+  assert.strictEqual(face.height, 8, "visage 8x8");
+
   mipmapApp.server.close();
   await mipmapApp.store.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 
-  console.log("OK - 25 scenarios passes");
+  console.log("OK - 26 scenarios passes");
 }
 
 main().catch((err) => {

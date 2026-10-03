@@ -86,4 +86,161 @@ function encodePng(width, height, rgba) {
   ]);
 }
 
-module.exports = { encodePng, crc32, PNG_SIGNATURE };
+/* ------------------------------------------------------------------ */
+/*  Decodeur PNG minimal (textures de blocs + tuiles)                  */
+/* ------------------------------------------------------------------ */
+/*
+ * Couvre ce que MipMap utilise : types couleur 0 (gris), 2 (RVB),
+ * 3 (palette, avec tRNS) et 6 (RGBA), profondeurs 1/2/4/8/16 bits,
+ * filtres 0..4. Pas d'entrelacement (les textures Bedrock n'en ont pas).
+ */
+
+const CHANNELS = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 };
+
+function paeth(a, b, c) {
+  const p = a + b - c;
+  const pa = Math.abs(p - a);
+  const pb = Math.abs(p - b);
+  const pc = Math.abs(p - c);
+  if (pa <= pb && pa <= pc) return a;
+  if (pb <= pc) return b;
+  return c;
+}
+
+/** Valeur brute d'un canal (profondeur 1/2/4/8/16) a l'indice donne. */
+function rawChannel(row, index, bitDepth) {
+  if (bitDepth === 8) return row[index];
+  if (bitDepth === 16) return row[index * 2]; // on garde l'octet fort
+  const perByte = 8 / bitDepth;
+  const byte = row[Math.floor(index / perByte)];
+  const shift = (perByte - 1 - (index % perByte)) * bitDepth;
+  return (byte >> shift) & ((1 << bitDepth) - 1);
+}
+
+/** Ramene une valeur brute sur 0..255. */
+function to8(value, bitDepth) {
+  if (bitDepth === 8 || bitDepth === 16) return value;
+  return Math.round((value * 255) / ((1 << bitDepth) - 1));
+}
+
+/**
+ * Decode un PNG RGBA/gris/palette en RGBA 8 bits.
+ * Retourne { width, height, data } (4 octets par pixel), ou lance une erreur.
+ */
+function decodePng(png) {
+  if (!Buffer.isBuffer(png) || png.length < 8) throw new Error("PNG vide");
+  if (!png.subarray(0, 8).equals(PNG_SIGNATURE)) throw new Error("signature PNG invalide");
+
+  let width = 0;
+  let height = 0;
+  let bitDepth = 8;
+  let colorType = 6;
+  let interlace = 0;
+  let palette = null;
+  let transparency = null;
+  const idat = [];
+
+  let pos = 8;
+  while (pos + 8 <= png.length) {
+    const len = png.readUInt32BE(pos);
+    const type = png.toString("latin1", pos + 4, pos + 8);
+    const data = png.subarray(pos + 8, pos + 8 + len);
+    if (type === "IHDR") {
+      width = data.readUInt32BE(0);
+      height = data.readUInt32BE(4);
+      bitDepth = data[8];
+      colorType = data[9];
+      interlace = data[12];
+    } else if (type === "PLTE") {
+      palette = data;
+    } else if (type === "tRNS") {
+      transparency = data;
+    } else if (type === "IDAT") {
+      idat.push(data);
+    } else if (type === "IEND") {
+      break;
+    }
+    pos += 12 + len;
+  }
+
+  if (!width || !height) throw new Error("IHDR manquante");
+  if (interlace !== 0) throw new Error("PNG entrelace non supporte");
+  const channels = CHANNELS[colorType];
+  if (!channels) throw new Error("type couleur non supporte : " + colorType);
+  if (![1, 2, 4, 8, 16].includes(bitDepth)) {
+    throw new Error("profondeur non supportee : " + bitDepth);
+  }
+
+  const bitsPerPixel = channels * bitDepth;
+  const bpp = Math.max(1, Math.ceil(bitsPerPixel / 8));
+  const rowBytes = Math.ceil((width * bitsPerPixel) / 8);
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  if (raw.length < (rowBytes + 1) * height) throw new Error("IDAT tronquee");
+
+  // Defiltrage ligne a ligne (filtres 0..4) dans un buffer continu.
+  const pixels = Buffer.alloc(rowBytes * height);
+  for (let y = 0; y < height; y++) {
+    const filter = raw[y * (rowBytes + 1)];
+    const src = raw.subarray(y * (rowBytes + 1) + 1, y * (rowBytes + 1) + 1 + rowBytes);
+    const cur = pixels.subarray(y * rowBytes, (y + 1) * rowBytes);
+    const prev = y > 0 ? pixels.subarray((y - 1) * rowBytes, y * rowBytes) : null;
+    for (let i = 0; i < rowBytes; i++) {
+      const a = i >= bpp ? cur[i - bpp] : 0;
+      const b = prev ? prev[i] : 0;
+      const c = prev && i >= bpp ? prev[i - bpp] : 0;
+      let v = src[i];
+      if (filter === 1) v += a;
+      else if (filter === 2) v += b;
+      else if (filter === 3) v += (a + b) >> 1;
+      else if (filter === 4) v += paeth(a, b, c);
+      else if (filter !== 0) throw new Error("filtre PNG non supporte : " + filter);
+      cur[i] = v & 0xff;
+    }
+  }
+
+  // Conversion en RGBA 8 bits.
+  const out = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    const row = pixels.subarray(y * rowBytes, (y + 1) * rowBytes);
+    for (let x = 0; x < width; x++) {
+      const o = (y * width + x) * 4;
+      if (colorType === 3) {
+        const idx = rawChannel(row, x, bitDepth);
+        const p = idx * 3;
+        out[o] = palette && p + 2 < palette.length ? palette[p] : 0;
+        out[o + 1] = palette && p + 2 < palette.length ? palette[p + 1] : 0;
+        out[o + 2] = palette && p + 2 < palette.length ? palette[p + 2] : 0;
+        out[o + 3] = transparency && idx < transparency.length ? transparency[idx] : 255;
+      } else if (colorType === 0) {
+        const raw = rawChannel(row, x, bitDepth);
+        const g = to8(raw, bitDepth);
+        out[o] = out[o + 1] = out[o + 2] = g;
+        out[o + 3] =
+          transparency && transparency.length >= 2 && raw === transparency[1]
+            ? transparency[0]
+            : 255;
+      } else if (colorType === 2) {
+        const base = x * channels;
+        out[o] = to8(rawChannel(row, base, bitDepth), bitDepth);
+        out[o + 1] = to8(rawChannel(row, base + 1, bitDepth), bitDepth);
+        out[o + 2] = to8(rawChannel(row, base + 2, bitDepth), bitDepth);
+        out[o + 3] = 255;
+      } else if (colorType === 4) {
+        const base = x * channels;
+        const g = to8(rawChannel(row, base, bitDepth), bitDepth);
+        out[o] = out[o + 1] = out[o + 2] = g;
+        out[o + 3] = to8(rawChannel(row, base + 1, bitDepth), bitDepth);
+      } else {
+        const base = x * channels;
+        out[o] = to8(rawChannel(row, base, bitDepth), bitDepth);
+        out[o + 1] = to8(rawChannel(row, base + 1, bitDepth), bitDepth);
+        out[o + 2] = to8(rawChannel(row, base + 2, bitDepth), bitDepth);
+        out[o + 3] = to8(rawChannel(row, base + 3, bitDepth), bitDepth);
+      }
+    }
+  }
+
+  return { width: width, height: height, data: out };
+}
+
+module.exports = { encodePng, decodePng, crc32, PNG_SIGNATURE };

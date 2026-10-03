@@ -1,9 +1,12 @@
-# mapserver — carte isométrique + relief vue de dessus
+# mapserver — webmap MipMap portée en Node.js
 
 Serveur **Node.js zéro dépendance** qui reçoit les chunks scannés par un plugin
 Endstone et sert dans le navigateur :
 
-* une **carte isométrique 3D** interactive (style BlueMap), rendue côté client ;
+* l'**interface web de MipMap** (Leaflet), servie sur `/`, avec ses **tuiles
+  texturées** rendues côté serveur (16 px/bloc, zoom 0–4) ;
+* une **carte isométrique 3D** interactive (style BlueMap), rendue côté client
+  (ancienne interface, `/index.html`) ;
 * un **relief vu de dessus** (plongée) **rendu côté serveur** : le serveur
 génère un PNG ombré à partir des chunks stockés, le navigateur ne fait que
 l'afficher. La page **s'ouvre à plat en relief vu de dessus** (la vue « de
@@ -77,6 +80,10 @@ firewall, allocation), pas le code.
 | `MAP_PLAYER_TTL_MS` | `30000` | durée de vie d'un joueur (repli après inactivité) |
 | `MAP_DATA_FILE` | `data/chunks.ndjson` | fichier de persistance |
 | `MAP_TILE_CHUNKS` | `8` | taille d'une tuile en chunks |
+| `MAP_SIZE` | `2000` | taille de vue annoncée à l'UI MipMap (px) |
+| `MAP_UPDATE_INTERVAL` | `5000` | intervalle de rafraîchissement des joueurs (ms) |
+| `MAP_DEFAULT_WORLD` | `Overworld` | monde ouvert au chargement (`Overworld`/`Nether`/`TheEnd`) |
+| `MAP_TEXTURES_DIR` | `assets/textures/blocks` | dossier des textures de blocs |
 | `MAP_RELIEF_MAX_SIDE` | `4096` | côté max (px) de l'image de relief |
 | `MAP_RELIEF_EXAGGERATION` | `1` | exagération des écarts de hauteur dans l'ombrage (`1` = MipMap) |
 
@@ -101,6 +108,9 @@ Deux façons de la définir (la variable d'environnement reste prioritaire) :
 | `GET` | `/api/status` | chunks, tiles, dimensions, joueurs en ligne |
 | `GET` | `/api/players` | joueurs connus, groupés par dimension |
 | `GET` | `/api/meta?dim=<d>` | étendue + Y min/max d'une dimension |
+| `GET` | `/api/config` | réglages de l'UI MipMap (`mapSize`, `updateInterval`, `defaultWorld`, zoom) |
+| `GET` | `/api/tiles/<monde>/<zoom>/<x>/<y>` | **tuile PNG 256 px**, 16 px/bloc (textures + ombrage MipMap) |
+| `GET` | `/api/players/<nom>/skin.png` | visage 8×8 (recadré du skin envoyé par le plugin) |
 | `GET` | `/api/relief/<dim>` | **relief vu de dessus**, PNG ombré (rendu serveur) |
 | `GET` | `/api/tile/<dim>/<tx>/<tz>` | chunks d'une tuile (consommé par l'UI) |
 | `GET` | `/api/chunk/<dim>/<cx>/<cz>` | un chunk précis |
@@ -199,10 +209,47 @@ Une dimension sans chunk renvoie `404`.
 C'est un rendu **synchrone** : sur un très gros monde la première génération
 prend quelques instants (les suivantes sont servies depuis le cache).
 
+## Interface MipMap portée en Node.js
+
+L'UI web de MipMap (`webmap/web/`, MIT) est **vendorée** dans
+`public/mipmap/` et servie sur `/` : carte **Leaflet** plein écran,
+sélecteur Overworld / Nether / End, coordonnées cliquables et marqueurs de
+joueurs avec leur visage. Ses assets sont servis sous `/static/*`.
+
+Le serveur Python (FastAPI + Pillow de MipMap) n'est **pas** utilisé : les
+routes qu'attend cette UI sont réimplémentées ici, sans dépendance :
+
+* `/api/config` — réglages (`MAP_SIZE`, `MAP_UPDATE_INTERVAL`, monde par défaut) ;
+* `/api/players` — liste `players[]` avec `dimension` en nom de monde et
+  l'URL du visage ;
+* `/api/players/<nom>/skin.png` — visage 8×8 recadré du skin brut envoyé par
+  le plugin (repli : `assets/skins/default.png`) ;
+* `/api/tiles/<monde>/<zoom>/<x>/<y>` — tuile PNG **rendue à la volée**.
+
+### Rendu des tuiles
+
+Comme MipMap, chaque bloc est recouvert de **sa texture 16×16**
+(`assets/textures/blocks`, 970+ fichiers vendorés depuis MipMap) puis éclairé
+avec la recette MipMap (`shade.js`) : bandes d'altitude, occlusion ambiante,
+lumière nord-ouest, courbes de niveau. Particularités de ce port :
+
+* `png.js` décode les textures (palette 2/4/8 bits, RVB, RGBA, tRNS, filtres
+  0–4) en plus d'encoder le PNG de sortie — toujours **zéro dépendance** ;
+* une tuile de zoom 4 fait 256 px pour 16 blocs (16 px/bloc) ; le zoom 0
+  couvre 256 blocs à 1 px/bloc : la tuile est rendue **directement** à la
+  résolution demandée (pas de pyramide pré-générée comme `zoomGenerator.py`) ;
+* les textures animées (bandes 16×64…) ne gardent que la **première image** ;
+* les tuiles sont **mises en cache** et invalidées dès qu'un nouveau chunk
+  arrive (`store.rev`) ; une zone non cartographiée répond `404` (Leaflet
+  n'affiche simplement rien).
+
+L'ancienne interface canvas (isométrique 3D + relief) reste disponible sur
+`/index.html`.
+
 ## Tests
 
 ```bash
-npm test        # 25 scénarios : auth, API, statique, persistance, protocole MipMap, relief + ombrage
+npm test        # 26 scénarios : auth, API, statique, persistance, protocole MipMap, relief, ombrage, tuiles MipMap
 ```
 
 ## Interface
