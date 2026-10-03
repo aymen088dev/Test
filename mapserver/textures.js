@@ -1,32 +1,37 @@
 "use strict";
 
 /* ------------------------------------------------------------------ */
-/*  Textures de blocs (issues de MipMap, MIT)                          */
+/*  Banque de textures de blocs                                        */
 /* ------------------------------------------------------------------ */
 /*
- * MipMap recouvre chaque bloc de sa texture 16x16 (`assets/textures/blocks`)
- * et travaille en 16 px/bloc. Ce module les decode une fois, garde un
- * cache 16x16 RGBA et un cache des versions reduites (zoom arriere).
+ * Deux sources sont fusionnees :
  *
- * Toutes les textures de MipMap decodent, mais beaucoup de blocs Bedrock
- * n'ont pas de fichier a leur nom (clotures, murs, vitres, portes, melon...).
- * MipMap les peignait en **magenta** ; ici on resout le meilleur fichier
- * possible, et a defaut on fabrique une texture unie avec la couleur du bloc
- * (`public/blocks.js`, repli deterministe) : plus de damier rose.
+ *   1. les textures de MipMap (MIT) deja presentes, nommage "Java" ;
+ *   2. la banque officielle Bedrock 1.26.50 (Mojang/bedrock-samples,
+ *      resource_pack/textures/blocks), nommage Bedrock, ~730 fichiers
+ *      supplementaires (feuilles, deepslate, cuivre, cerisier, pale oak...).
  *
- * Les textures animees des texture packs Bedrock sont des bandes
- * verticales (ex. 16x64) : on ne garde que la premiere image (16x16).
+ * `assets/bedrock_blocks.json` (genere depuis `blocks.json` +
+ * `terrain_texture.json` de ce resource pack) donne pour chaque bloc
+ * Bedrock la texture exacte de sa face superieure : c'est la resolution la
+ * plus fiable, utilisee en priorite. A defaut on retombe sur les nommages
+ * derives (`_fence`, `_wall`, `_slab`...) puis sur une couleur unie, jamais
+ * sur le damier magenta.
+ *
+ * Les images peuvent etre des PNG (decodeur maison) ou des TGA (types 2/10,
+ * 24/32 bits, 8 bits palette) quand le resource pack n'en fournit pas de PNG.
  */
 
 const fs = require("fs");
 const path = require("path");
 
-const { decodePng } = require("./png");
+const { decodePng, decodeTga } = require("./png");
 const { blockColor } = require("./public/blocks");
 
 const TEXTURES_DIR =
   process.env.MAP_TEXTURES_DIR ||
   path.join(__dirname, "assets", "textures", "blocks");
+const BEDROCK_MAP_FILE = path.join(__dirname, "assets", "bedrock_blocks.json");
 const BLOCK = 16; // taille de reference d'une texture de bloc
 
 // Suffixes de blocs derives : on retombe sur leur materiau de base.
@@ -47,20 +52,41 @@ const ALIASES = {
   torchfire: "torch",
 };
 
-let available = null;
+let available = null; // Map nom sans extension -> nom de fichier
+let bedrockMap = null; // bloc Bedrock -> nom sans extension
 
-/** Liste des textures disponibles (chargee une fois). */
+/** Index de la banque : nom sans extension -> fichier (PNG prioritaire). */
 function availableTextures() {
   if (available) return available;
-  available = new Set();
+  available = new Map();
   try {
     for (const file of fs.readdirSync(TEXTURES_DIR)) {
-      if (file.endsWith(".png")) available.add(file.slice(0, -4));
+      if (!file.endsWith(".png") && !file.endsWith(".tga")) continue;
+      if (file.includes("_mers")) continue; // specular maps, inutiles ici
+      const ext = path.extname(file);
+      const base = file.slice(0, -ext.length);
+      const prev = available.get(base);
+      if (!prev || (prev.endsWith(".tga") && ext === ".png")) {
+        available.set(base, file);
+      }
     }
   } catch (err) {
     console.warn(`[map] dossier de textures illisible : ${TEXTURES_DIR} (${err.message})`);
   }
   return available;
+}
+
+/** Table Bedrock officielle : nom de bloc -> texture de la face du dessus. */
+function bedrockBlocks() {
+  if (bedrockMap) return bedrockMap;
+  bedrockMap = new Map();
+  try {
+    const map = JSON.parse(fs.readFileSync(BEDROCK_MAP_FILE, "utf8"));
+    for (const [name, file] of Object.entries(map)) bedrockMap.set(name, file);
+  } catch (err) {
+    console.warn(`[map] table Bedrock illisible : ${BEDROCK_MAP_FILE} (${err.message})`);
+  }
+  return bedrockMap;
 }
 
 /** Noms candidats pour un bloc, du plus precis au plus generique. */
@@ -79,7 +105,7 @@ function candidates(slug) {
 
 const resolved = new Map(); // slug -> nom de fichier | null
 const synthesized = new Set(); // blocs sans texture : couleur unie
-const cache = new Map(); // nom de fichier -> Buffer(16*16*4) | null
+const cache = new Map(); // nom de fichier -> Buffer(16*16*4)
 const scaledCache = new Map(); // "fichier@px" -> Buffer(px*px*4)
 
 /** Nom de fichier de texture a utiliser pour un bloc, ou null. */
@@ -88,12 +114,19 @@ function resolveFile(blockName) {
   if (resolved.has(slug)) return resolved.get(slug);
   const files = availableTextures();
   let found = null;
-  for (const candidate of candidates(slug)) {
-    if (files.has(candidate)) {
-      found = candidate;
-      break;
+
+  const official = bedrockBlocks().get(slug);
+  if (official && files.has(official)) found = files.get(official);
+
+  if (!found) {
+    for (const candidate of candidates(slug)) {
+      if (files.has(candidate)) {
+        found = files.get(candidate);
+        break;
+      }
     }
   }
+
   resolved.set(slug, found);
   return found;
 }
@@ -117,6 +150,11 @@ function colorTexture(blockName) {
     buf[i * 4 + 3] = 255;
   }
   return buf;
+}
+
+/** Decode une texture PNG ou TGA. */
+function decodeImage(file, buffer) {
+  return file.endsWith(".tga") ? decodeTga(buffer) : decodePng(buffer);
 }
 
 /** Recadre la premiere image d'une texture (bandes animees des texture packs). */
@@ -151,9 +189,9 @@ function textureFor(blockName) {
   if (cache.has(file)) return cache.get(file);
   let data = null;
   try {
-    data = firstFrame(decodePng(fs.readFileSync(path.join(TEXTURES_DIR, file + ".png"))));
+    data = firstFrame(decodeImage(file, fs.readFileSync(path.join(TEXTURES_DIR, file))));
   } catch (err) {
-    console.warn(`[map] texture illisible : ${file}.png (${err.message})`);
+    console.warn(`[map] texture illisible : ${file} (${err.message})`);
   }
   if (!data) data = colorTexture(blockName);
   cache.set(file, data);
@@ -227,6 +265,7 @@ function stats() {
   return {
     dir: TEXTURES_DIR,
     available: availableTextures().size,
+    bedrock: bedrockBlocks().size,
     loaded: cache.size,
     scaled: scaledCache.size,
     resolved: resolved.size,
@@ -239,6 +278,8 @@ function clear() {
   scaledCache.clear();
   resolved.clear();
   synthesized.clear();
+  available = null;
+  bedrockMap = null;
 }
 
 module.exports = {

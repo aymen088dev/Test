@@ -243,4 +243,95 @@ function decodePng(png) {
   return { width: width, height: height, data: out };
 }
 
-module.exports = { encodePng, decodePng, crc32, PNG_SIGNATURE };
+/*
+ * Decodeur TGA minimal : types 1/2/3 (non compresse) et 9/10/11 (RLE),
+ * 8 bits palette, 24 et 32 bits. Les texture packs Bedrock rangent parfois
+ * une image sur deux en .tga (feuilles, herbe haute, cactus...) : sans ca
+ * ces blocs tombent sur une couleur unie.
+ */
+function decodeTga(tga) {
+  if (!Buffer.isBuffer(tga) || tga.length < 18) throw new Error("TGA vide");
+  const idLength = tga[0];
+  const colorMapType = tga[1];
+  const imageType = tga[2];
+  const colorMapFirst = tga.readUInt16LE(3);
+  const colorMapLength = tga.readUInt16LE(5);
+  const colorMapEntry = tga[7];
+  const width = tga.readUInt16LE(12);
+  const height = tga.readUInt16LE(14);
+  const depth = tga[16];
+  const descriptor = tga[17];
+  if (!width || !height) throw new Error("dimensions TGA invalides");
+
+  const rle = imageType === 9 || imageType === 10 || imageType === 11;
+  const base = imageType === 1 || imageType === 9 ? 1 : imageType === 2 || imageType === 10 ? 2 : 3;
+  let pos = 18 + idLength;
+
+  // Palette eventuelle (color-mapped)
+  let palette = null;
+  if (colorMapType === 1 && base === 1) {
+    const entryBytes = Math.max(1, colorMapEntry / 8);
+    const count = colorMapLength || 256;
+    palette = [];
+    for (let i = 0; i < count; i++) {
+      const p = pos + i * entryBytes;
+      palette.push([tga[p + 2] || 0, tga[p + 1] || 0, tga[p] || 0, entryBytes === 4 ? tga[p + 3] : 255]);
+    }
+    pos += count * entryBytes;
+  }
+
+  const pixelBytes = base === 1 ? (colorMapEntry ? colorMapEntry / 8 : 1) : Math.max(1, depth / 8);
+  const total = width * height;
+  const pixels = new Array(total);
+  const colorMapped = palette !== null;
+
+  function readOne() {
+    const p = pos;
+    pos += pixelBytes;
+    if (p + pixelBytes > tga.length) return [0, 0, 0, 0]; // fichier tronque
+    if (colorMapped) {
+      const raw = pixelBytes >= 2 ? tga.readUInt16LE(p) : tga[p];
+      const idx = raw - colorMapFirst;
+      return palette[idx] || [0, 0, 0, 255];
+    }
+    if (base === 3 || (base === 1 && colorMapType === 0)) {
+      return [tga[p], tga[p], tga[p], 255];
+    }
+    return [tga[p + 2], tga[p + 1], tga[p], pixelBytes === 4 ? tga[p + 3] : 255];
+  }
+
+  let i = 0;
+  while (i < total) {
+    let count = 1;
+    let repeated = false;
+    if (rle) {
+      const packet = tga[pos];
+      pos += 1;
+      count = (packet & 0x7f) + 1;
+      repeated = (packet & 0x80) !== 0;
+      if (repeated) {
+        const one = readOne();
+        for (let n = 0; n < count && i < total; n++, i++) pixels[i] = one;
+        continue;
+      }
+    }
+    for (let n = 0; n < count && i < total; n++, i++) pixels[i] = readOne();
+  }
+
+  const out = Buffer.alloc(total * 4);
+  const topDown = (descriptor & 0x20) !== 0;
+  for (let y = 0; y < height; y++) {
+    const srcRow = topDown ? y : height - 1 - y;
+    for (let x = 0; x < width; x++) {
+      const p = pixels[srcRow * width + x] || [0, 0, 0, 0];
+      const o = (y * width + x) * 4;
+      out[o] = p[0];
+      out[o + 1] = p[1];
+      out[o + 2] = p[2];
+      out[o + 3] = p[3];
+    }
+  }
+  return { width: width, height: height, data: out };
+}
+
+module.exports = { encodePng, decodePng, decodeTga, crc32, PNG_SIGNATURE };

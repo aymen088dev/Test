@@ -6,7 +6,7 @@ const os = require("os");
 const path = require("path");
 const { createApp, MapStore } = require("./server");
 const { normalizeDimension, chunksFromMipmap, playersFromMipmap } = require("./mipmap");
-const { encodePng, decodePng } = require("./png");
+const { encodePng, decodePng, decodeTga } = require("./png");
 const { renderReliefPng } = require("./relief");
 const { blockColor } = require("./public/blocks");
 const { scaledTexture, resolveFile } = require("./textures");
@@ -552,19 +552,55 @@ async function main() {
   assert.strictEqual(emptyImg.width, 256, "tuile vide 256 px");
   assert.strictEqual(pixelAt(emptyImg, 128, 128)[3], 0, "tuile vide transparente");
 
-  // Banque de textures : blocs derives resolus + repli couleur (plus de magenta).
-  assert.strictEqual(resolveFile("minecraft:oak_fence"), "oak_planks", "cloture -> planches");
+  // Banque de textures : table Bedrock 1.26.50 (face du dessus) puis derives,
+  // puis repli couleur (plus jamais de magenta).
+  assert.strictEqual(
+    resolveFile("minecraft:oak_fence"),
+    "planks_oak.png",
+    "cloture -> planches (table Bedrock)"
+  );
   assert.strictEqual(
     resolveFile("minecraft:cobblestone_wall"),
-    "cobblestone",
+    "cobblestone.png",
     "mur -> pierre taillee"
   );
   assert.strictEqual(
     resolveFile("minecraft:purple_stained_glass_pane"),
-    "purple_stained_glass",
+    "glass_purple.png",
     "vitre teintee -> verre teinte"
   );
-  assert.strictEqual(resolveFile("minecraft:melon"), "melon_block", "melon -> bloc de melon");
+  assert.strictEqual(resolveFile("minecraft:melon"), "melon_block.png", "melon -> bloc de melon");
+  assert.strictEqual(
+    resolveFile("minecraft:cherry_log"),
+    "cherry_log_top.png",
+    "bucher -> face du dessus (cerisier)"
+  );
+  assert.strictEqual(
+    resolveFile("minecraft:pale_oak_leaves"),
+    "pale_oak_leaves.tga",
+    "texture TGA du resource pack officiel"
+  );
+
+  // Decodeur TGA (types 2/10, 24/32 bits, palette 8 bits) : les feuilles,
+  // le cactus, la canne a sucre... n'existent qu'en TGA dans le pack Mojang.
+  const tgaImg = decodeTga(
+    fs.readFileSync(path.join(__dirname, "assets", "textures", "blocks", "fern.tga"))
+  );
+  assert.strictEqual(tgaImg.width, 16, "TGA 16 px de large");
+  assert.strictEqual(tgaImg.height, 16, "TGA 16 px de haut");
+  assert.strictEqual(tgaImg.data.length, 16 * 16 * 4, "TGA decode en RGBA");
+  assert.ok(tgaImg.data[3] > 0 || tgaImg.data[16 * 3] > 0, "TGA avec des pixels opaques");
+
+  // Couverture de la banque Bedrock : ~1300 blocs de 1.26.50 ont une texture.
+  const bedrockTable = JSON.parse(
+    fs.readFileSync(path.join(__dirname, "assets", "bedrock_blocks.json"), "utf8")
+  );
+  const bedrockNames = Object.keys(bedrockTable);
+  assert.ok(bedrockNames.length > 1300, "table Bedrock fournie (" + bedrockNames.length + ")");
+  const missing = bedrockNames.filter((name) => !resolveFile("minecraft:" + name));
+  assert.strictEqual(missing.length, 0, "chaque bloc de la table a une texture : " + missing.slice(0, 5));
+  const textureFiles = fs.readdirSync(path.join(__dirname, "assets", "textures", "blocks"));
+  assert.ok(textureFiles.length > 1700, "banque de textures etendue (" + textureFiles.length + " fichiers)");
   const unknownTex = scaledTexture("minecraft:pas_un_bloc_connu", 16);
   assert.ok(
     !(unknownTex[0] === 255 && unknownTex[1] === 0 && unknownTex[2] === 255),

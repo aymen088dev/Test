@@ -228,23 +228,32 @@ routes qu'attend cette UI sont réimplémentées ici, sans dépendance :
 
 ### Rendu des tuiles
 
-Comme MipMap, chaque bloc est recouvert de **sa texture 16×16**
-(`assets/textures/blocks`, 970+ fichiers vendorés depuis MipMap) puis éclairé
+Comme MipMap, chaque bloc est recouvert de **sa texture 16×16** puis éclairé
 avec la recette MipMap (`shade.js`) : bandes d'altitude, occlusion ambiante,
 lumière nord-ouest, courbes de niveau. Particularités de ce port :
 
+* la **banque de textures est élargie** : `assets/textures/blocks` contient
+  ~1750 fichiers, la banque MipMap (nommage « Java ») **plus** les textures de
+  la banque officielle **Bedrock 1.26.50** (`Mojang/bedrock-samples`), soit
+  ~730 fichiers supplémentaires (deepslate, cuivre, cerisier, pale oak,
+  feuilles, bambou, sculk…). Voir `assets/NOTICE.md` pour la provenance ;
+* `assets/bedrock_blocks.json` (généré depuis `blocks.json` +
+  `terrain_texture.json` du pack Mojang) donne pour **~1330 blocs Bedrock** la
+  texture **exacte de la face du dessus** ; c'est la résolution prioritaire,
+  avant les noms dérivés et le repli couleur ;
 * `png.js` décode les textures (palette 2/4/8 bits, RVB, RGBA, tRNS, filtres
-  0–4) en plus d'encoder le PNG de sortie — toujours **zéro dépendance** ;
+  0–4) **et les TGA** (types 2/10, 24/32 bits, palette 8 bits) : le pack Mojang
+  ne fournit que du TGA pour une partie des blocs (feuilles, cactus, canne à
+  sucre, herbe haute…) — en plus d'encoder le PNG de sortie, toujours
+  **zéro dépendance** ;
 * une tuile de zoom 4 fait 256 px pour 16 blocs (16 px/bloc) ; le zoom 0
   couvre 256 blocs à 1 px/bloc : la tuile est rendue **directement** à la
   résolution demandée (pas de pyramide pré-générée comme `zoomGenerator.py`) ;
 * les textures animées (bandes 16×64…) ne gardent que la **première image** ;
-* la **banque de textures est complétée** : beaucoup de blocs Bedrock n'ont pas
-  de fichier à leur nom (clôtures, murs, vitres, portes…). MipMap les peignait
-  en magenta ; ici le bloc est résolu vers son matériau de base
-  (`oak_fence` → `oak_planks`, `*_wall` → pierre, `*_glass_pane` → verre teinté,
-  `melon` → `melon_block`, `iron_bars` → `iron_block`…), et à défaut il est
-  peint avec la **couleur du bloc** (`public/blocks.js`) — plus de blocs roses ;
+* pour les blocs absents de la table Bedrock, le bloc est résolu vers son
+  matériau de base (`oak_fence` → planches, `*_wall` → pierre,
+  `*_glass_pane` → verre teinté…), et à défaut peint avec la **couleur du bloc**
+  (`public/blocks.js`) — MipMap les peignait en **magenta**, plus de blocs roses ;
 * les tuiles sont **mises en cache** (clé `store.rev`) et revalidées par `ETag`
   (`Cache-Control: no-cache`, `304` si rien n'a bougé) : le navigateur ne
   conserve donc pas une tuile vide alors que des chunks viennent d'arriver ;
