@@ -1,7 +1,13 @@
-# mapserver — carte isométrique en direct
+# mapserver — carte isométrique + relief vue de dessus
 
 Serveur **Node.js zéro dépendance** qui reçoit les chunks scannés par un plugin
-Endstone et sert une **carte isométrique 3D** dans le navigateur (style BlueMap).
+Endstone et sert dans le navigateur :
+
+* une **carte isométrique 3D** interactive (style BlueMap), rendue côté client ;
+* un **relief vu de dessus** (plongée) **rendu côté serveur** : le serveur
+génère un PNG ombré à partir des chunks stockés, le navigateur ne fait que
+l'afficher. Bascule `3D` / `Relief` dans l'en-tête de la page (`?view=relief`
+pour ouvrir directement en relief).
 
 Deux sources de données sont acceptées :
 
@@ -70,6 +76,8 @@ firewall, allocation), pas le code.
 | `MAP_PLAYER_TTL_MS` | `30000` | durée de vie d'un joueur (repli après inactivité) |
 | `MAP_DATA_FILE` | `data/chunks.ndjson` | fichier de persistance |
 | `MAP_TILE_CHUNKS` | `8` | taille d'une tuile en chunks |
+| `MAP_RELIEF_MAX_SIDE` | `4096` | côté max (px) de l'image de relief |
+| `MAP_RELIEF_EXAGGERATION` | `1.5` | exagération verticale du relief |
 
 **Configure la clé d'API** et mets la même valeur dans `api_key` du plugin :
 sinon n'importe qui peut écrire sur ta carte.
@@ -92,6 +100,7 @@ Deux façons de la définir (la variable d'environnement reste prioritaire) :
 | `GET` | `/api/status` | chunks, tiles, dimensions, joueurs en ligne |
 | `GET` | `/api/players` | joueurs connus, groupés par dimension |
 | `GET` | `/api/meta?dim=<d>` | étendue + Y min/max d'une dimension |
+| `GET` | `/api/relief/<dim>` | **relief vu de dessus**, PNG ombré (rendu serveur) |
 | `GET` | `/api/tile/<dim>/<tx>/<tz>` | chunks d'une tuile (consommé par l'UI) |
 | `GET` | `/api/chunk/<dim>/<cx>/<cz>` | un chunk précis |
 | `GET` | `/api/chunks?dim&cx0&cz0&cx1&cz1` | plage de chunks |
@@ -158,18 +167,43 @@ Les chunks sont écrits en **append-only** dans `data/chunks.ndjson`
 l'emporte, puis un **compactage** est lancé si le fichier est gonflé par les
 mises à jour. Écrit proprement à l'arrêt (`SIGINT`/`SIGTERM`).
 
+## Relief vu de dessus (rendu serveur)
+
+`GET /api/relief/<dim>` renvoie un **PNG** — pas du JSON — calculé par le
+serveur à partir des chunks stockés :
+
+1. `relief.js` construit une grille **1 pixel = 1 bloc** (hauteur du bloc de
+   surface + couleur), bornée par l'étendue de la dimension. Si le monde dépasse
+   `MAP_RELIEF_MAX_SIDE` / 12 M pixels, la grille est sous-échantillonnée
+   (hauteur maximale conservée) pour garder un fichier raisonnable.
+2. La grille est **éclairée** comme une carte de relief : normale calculée par
+   gradient, lumière fixe au **nord-ouest** (azimut ~315°), légère teinte
+d'altitude. Les zones non cartographiées restent transparentes.
+3. `png.js` encode le résultat en PNG RGBA avec le `zlib` **intégré à Node** :
+   aucune dépendance n'est ajoutée (pas de canvas, pas de sharp).
+
+Le PNG est **mis en cache** par dimension et invalidé dès qu'un nouveau chunk
+arrive : recharger la page ne relance pas le rendu tant que rien n'a changé.
+Une dimension sans chunk renvoie `404`.
+
+C'est un rendu **synchrone** : sur un très gros monde la première génération
+prend quelques instants (les suivantes sont servies depuis le cache).
+
 ## Tests
 
 ```bash
-npm test        # 22 assertions : auth, API, statique, persistance, protocole MipMap
+npm test        # 24 assertions : auth, API, statique, persistance, protocole MipMap, relief
 ```
 
 ## Interface
 
 `public/` — canvas plein écran, déplacement à la souris, molette pour zoomer,
-sélecteur de dimension.
+sélecteur de dimension, bascule **3D / Relief**.
 
-* **Rendu** : projection isométrique, faces top + deux faces latérales
+* **Vue relief** : l'image PNG de `/api/relief/<dim>` est affichée telle quelle
+  (serveur), avec sa taille en légende. Les tuiles ne sont pas téléchargées dans
+  ce mode et le zoom est désactivé.
+* **Rendu 3D** : projection isométrique, faces top + deux faces latérales
   (parois colorées grâce à `depth > 1` côté plugin), ordre peintre par `x+z`.
 * **Performance** : le monde est rendu **progressivement** dans un canvas
   hors-échelle (22 ms par frame), puis simplement blité à chaque image →

@@ -22,6 +22,11 @@ const chunkCountEl = document.getElementById("chunk-count");
 const playersPanel = document.getElementById("players-panel");
 const playersList = document.getElementById("players-list");
 const playersCount = document.getElementById("players-count");
+const viewIsoBtn = document.getElementById("view-iso");
+const viewReliefBtn = document.getElementById("view-relief");
+const reliefWrap = document.getElementById("relief-wrap");
+const reliefImg = document.getElementById("relief");
+const reliefCaption = document.getElementById("relief-caption");
 
 /* ------------------------------------------------------------------ */
 /*  Etat                                                               */
@@ -29,6 +34,7 @@ const playersCount = document.getElementById("players-count");
 
 const state = {
   dim: "overworld",
+  view: "iso", // "iso" (isometrique client) ou "relief" (PNG rendu serveur)
   tileChunks: 8,
   chunks: new Map(), // "cx,cz" -> payload
   tiles: new Map(), // "tx,tz" -> { status, chunks }
@@ -564,6 +570,65 @@ function drawPlayers() {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Relief vu de dessus (rendu cote serveur)                           */
+/* ------------------------------------------------------------------ */
+
+let reliefUrl = null;
+let reliefToken = 0;
+
+async function loadRelief() {
+  const dim = state.dim;
+  const token = ++reliefToken;
+  reliefCaption.textContent = "rendu du relief…";
+  reliefImg.removeAttribute("src");
+  loaderEl.classList.add("show");
+  try {
+    const res = await fetch(
+      "api/relief/" + encodeURIComponent(dim) + "?t=" + Date.now(),
+      { cache: "no-store" }
+    );
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const blob = await res.blob();
+    if (token !== reliefToken) return;
+    if (reliefUrl) URL.revokeObjectURL(reliefUrl);
+    reliefUrl = URL.createObjectURL(blob);
+    reliefImg.onload = () => {
+      reliefCaption.textContent =
+        "relief vu de dessus · " +
+        reliefImg.naturalWidth +
+        "×" +
+        reliefImg.naturalHeight +
+        " px · rendu serveur";
+    };
+    reliefImg.src = reliefUrl;
+  } catch (err) {
+    if (token !== reliefToken) return;
+    reliefCaption.textContent = "relief indisponible (" + err.message + ")";
+  } finally {
+    if (token === reliefToken) loaderEl.classList.remove("show");
+  }
+}
+
+function setView(view) {
+  if (view === state.view) return;
+  state.view = view;
+  const relief = view === "relief";
+  viewIsoBtn.classList.toggle("active", !relief);
+  viewReliefBtn.classList.toggle("active", relief);
+  reliefWrap.hidden = !relief;
+  canvas.style.visibility = relief ? "hidden" : "visible";
+  for (const id of ["zoom-in", "zoom-out", "zoom-reset"]) {
+    document.getElementById(id).disabled = relief;
+  }
+  hintEl.classList.toggle("hide", relief ? true : !autoFit);
+  if (relief) {
+    loadRelief();
+  } else {
+    scheduleVisibleTiles();
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /*  Camera                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -636,6 +701,8 @@ function visibleChunkRange() {
 
 function updateVisibleTiles() {
   if (!state.meta) return;
+  // En mode relief c'est le serveur qui rend l'image : pas de tuiles a tirer.
+  if (state.view !== "iso") return;
   const T = state.tileChunks;
   const B = 16 * T;
   const r = visibleChunkRange();
@@ -747,6 +814,9 @@ function bindControls() {
     scheduleVisibleTiles();
   });
 
+  viewIsoBtn.addEventListener("click", () => setView("iso"));
+  viewReliefBtn.addEventListener("click", () => setView("relief"));
+
   dimSelect.addEventListener("change", () => switchDim(dimSelect.value));
 }
 
@@ -763,6 +833,10 @@ async function switchDim(dim) {
   autoFit = true;
   offscreen = document.createElement("canvas");
   await loadMeta();
+  if (state.view === "relief") {
+    loadRelief();
+    return;
+  }
   updateVisibleTiles();
   scheduleRebuild();
 }
@@ -780,7 +854,11 @@ async function poll() {
     const before = state.meta ? state.meta.count : -1;
     if (before !== -1 && data.chunks !== before) {
       await loadMeta();
-      updateVisibleTiles();
+      if (state.view === "relief") {
+        loadRelief();
+      } else {
+        updateVisibleTiles();
+      }
     }
     await loadPlayers();
   } catch {
@@ -806,6 +884,9 @@ async function boot() {
   }
 
   updateVisibleTiles();
+  if (new URLSearchParams(location.search).get("view") === "relief") {
+    setView("relief");
+  }
   setInterval(poll, 8000);
 }
 

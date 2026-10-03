@@ -164,6 +164,40 @@ button:hover {
   border-color: rgba(46, 230, 168, 0.5);
 }
 
+/* Bascule isometrique / relief (rendu cote serveur) */
+.segment {
+  display: flex;
+  padding: 3px;
+  gap: 3px;
+  border-radius: 11px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+
+.segment button {
+  border: 0;
+  background: transparent;
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.segment button:hover {
+  color: var(--text);
+}
+
+.segment button.active {
+  color: #06251b;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .zoom {
   display: flex;
   gap: 6px;
@@ -218,6 +252,42 @@ button:hover {
 
 #map.drag {
   cursor: grabbing;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Relief vu de dessus (PNG rendu par le serveur)                    */
+/* ------------------------------------------------------------------ */
+
+.relief {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  display: grid;
+  grid-template-rows: 1fr auto;
+  place-items: center;
+  padding: 62px 16px 34px;
+  gap: 10px;
+}
+
+.relief img {
+  max-width: 100%;
+  max-height: 100%;
+  image-rendering: pixelated;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.55);
+  background: #0d1117;
+}
+
+.relief figcaption {
+  font-size: 12px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.relief figcaption::before {
+  content: "▲ ";
+  color: var(--accent);
 }
 
 .hint {

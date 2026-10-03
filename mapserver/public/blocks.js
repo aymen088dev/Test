@@ -184,3 +184,10 @@ function blockColor(id) {
   colorCache.set(id, color);
   return color;
 }
+
+// Le serveur Node reutilise exactement la meme table de couleurs pour le
+// rendu de relief (public/blocks.js est charge comme script dans le
+// navigateur, et comme module cote serveur).
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = { BLOCK_COLORS, blockColor, fallbackColor };
+}

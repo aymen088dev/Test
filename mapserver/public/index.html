@@ -18,6 +18,10 @@
 
       <div class="tools">
         <select id="dim-select" aria-label="Dimension"></select>
+        <div class="segment" id="view-toggle" role="group" aria-label="Mode d'affichage">
+          <button id="view-iso" type="button" class="active" title="Vue isométrique 3D (navigateur)">3D</button>
+          <button id="view-relief" type="button" title="Relief vu de dessus (rendu par le serveur)">Relief</button>
+        </div>
         <div class="zoom">
           <button id="zoom-out" type="button" title="Dézoomer">−</button>
           <button id="zoom-reset" type="button" title="Recentrer">◎</button>
@@ -32,6 +36,10 @@
 
     <main id="stage">
       <canvas id="map"></canvas>
+      <figure class="relief" id="relief-wrap" hidden>
+        <img id="relief" alt="Relief du monde vu de dessus" />
+        <figcaption id="relief-caption">Relief vu de dessus · rendu serveur</figcaption>
+      </figure>
       <aside class="players" id="players-panel" hidden>
         <h2>Joueurs <span id="players-count">0</span></h2>
         <ul id="players-list"></ul>

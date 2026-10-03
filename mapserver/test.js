@@ -6,6 +6,8 @@ const os = require("os");
 const path = require("path");
 const { createApp, MapStore } = require("./server");
 const { normalizeDimension, chunksFromMipmap, playersFromMipmap } = require("./mipmap");
+const { encodePng } = require("./png");
+const { renderReliefPng } = require("./relief");
 
 function sampleChunk(cx, cz) {
   const cells = [];
@@ -320,11 +322,40 @@ async function main() {
   assert.deepStrictEqual(neg.cells[0], [12, 0], "cell 0 = coin (-16,-32)");
   assert.ok(neg.cells.every((c) => c.length === 2), "aucune colonne vide");
 
+  // 23. relief vu de dessus, rendu cote serveur -> PNG
+  const reliefRes = await fetch(mipBase + "/api/relief/minecraft:overworld");
+  assert.strictEqual(reliefRes.status, 200, "relief servi");
+  assert.strictEqual(reliefRes.headers.get("content-type"), "image/png");
+  const reliefPng = Buffer.from(await reliefRes.arrayBuffer());
+  assert.deepStrictEqual(
+    [...reliefPng.subarray(0, 8)],
+    [137, 80, 78, 71, 13, 10, 26, 10],
+    "signature PNG du relief"
+  );
+  assert.ok(reliefPng.readUInt32BE(16) >= 16, "image de relief dimensionnee");
+  const noRelief = await fetch(mipBase + "/api/relief/minecraft:nowhere");
+  assert.strictEqual(noRelief.status, 404, "dimension inconnue : pas de relief");
+
+  // 24. briques internes : encodeur PNG + relief deterministes
+  const flat = Buffer.alloc(4 * 4 * 4, 255);
+  const flatPng = encodePng(4, 4, flat);
+  assert.deepStrictEqual(
+    [...flatPng.subarray(0, 8)],
+    [137, 80, 78, 71, 13, 10, 26, 10],
+    "encodeur PNG"
+  );
+  assert.strictEqual(flatPng.readUInt32BE(16), 4, "largeur PNG encodee");
+  assert.strictEqual(flatPng.readUInt32BE(20), 4, "hauteur PNG encodee");
+  const synthetic = renderReliefPng([sampleChunk(0, 0)]);
+  assert.strictEqual(synthetic.width, 16, "un chunk = 16 px");
+  assert.strictEqual(synthetic.height, 16, "un chunk = 16 px");
+  assert.ok(synthetic.buffer.length > 100, "PNG de relief non vide");
+
   mipmapApp.server.close();
   await mipmapApp.store.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 
-  console.log("OK - 22 assertions passees");
+  console.log("OK - 24 assertions passees");
 }
 
 main().catch((err) => {

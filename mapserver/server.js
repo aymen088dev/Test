@@ -5,7 +5,8 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 
-const { chunksFromMipmap, playersFromMipmap, dimensionLabel } = require("./mipmap");
+const { chunksFromMipmap, playersFromMipmap, dimensionLabel, normalizeDimension } = require("./mipmap");
+const { renderReliefPng } = require("./relief");
 
 // ---------------------------------------------------------------------------
 // CONFIGURATION - modifie directement la cle ici
@@ -37,6 +38,8 @@ class MapStore {
     this.stream = null;
     this.lines = 0;
     this.appends = 0;
+    // Incremente a chaque chunk ecrit : sert de cle de cache au relief.
+    this.rev = 0;
 
     if (dataFile) {
       fs.mkdirSync(path.dirname(dataFile), { recursive: true });
@@ -73,6 +76,7 @@ class MapStore {
     const key = this._key(payload.dim, payload.cx, payload.cz);
     const isNew = !this.chunks.has(key);
     this.chunks.set(key, payload);
+    this.rev += 1;
 
     const [tx, tz] = this.tileOf(payload.cx, payload.cz);
     const tk = this._tileKey(payload.dim, tx, tz);
@@ -177,6 +181,15 @@ class MapStore {
     return out.filter(Boolean);
   }
 
+  /** Tous les chunks d'une dimension (sans la limite de `range`). */
+  all(dim) {
+    const out = [];
+    for (const payload of this.chunks.values()) {
+      if (payload.dim === dim) out.push(payload);
+    }
+    return out;
+  }
+
   range(dim, cx0, cz0, cx1, cz1) {
     const out = [];
     for (const payload of this.chunks.values()) {
@@ -276,6 +289,17 @@ function sendJson(res, code, obj) {
     "Access-Control-Allow-Origin": "*",
   });
   res.end(body);
+}
+
+function sendPng(res, buffer, width, height) {
+  res.writeHead(200, {
+    "Content-Type": "image/png",
+    "Content-Length": buffer.length,
+    "Cache-Control": "no-store",
+    "Access-Control-Allow-Origin": "*",
+    "X-Relief-Size": width + "x" + height,
+  });
+  res.end(buffer);
 }
 
 function applyCors(res) {
@@ -440,6 +464,9 @@ function createApp(options = {}) {
   const publicDir = options.publicDir || PUBLIC_DIR;
   const startedAt = Date.now();
   let authRejected = 0;
+  // Cache du relief par dimension : evite de re-rendre l'image a chaque
+  // rechargement tant qu'aucun nouveau chunk n'est arrive (store.rev).
+  const reliefCache = new Map();
 
   const server = http.createServer(async (req, res) => {
     applyCors(res);
@@ -562,6 +589,40 @@ function createApp(options = {}) {
       }
 
       const parts = pathname.split("/").filter(Boolean);
+
+      if (parts[0] === "api" && parts[1] === "relief" && parts.length === 3) {
+        // GET /api/relief/<dim>[.png]  ->  relief vu de dessus rendu ici.
+        let dim = parts[2];
+        if (dim.endsWith(".png")) dim = dim.slice(0, -4);
+        if (!store.dims.has(dim)) {
+          const normalized = normalizeDimension(dim);
+          if (store.dims.has(normalized)) dim = normalized;
+        }
+        const chunks = store.all(dim);
+        if (!chunks.length) {
+          sendJson(res, 404, { error: "aucun chunk pour cette dimension", dim: dim });
+          return;
+        }
+        const cached = reliefCache.get(dim);
+        if (cached && cached.rev === store.rev) {
+          sendPng(res, cached.png, cached.width, cached.height);
+          return;
+        }
+        const relief = renderReliefPng(chunks);
+        if (!relief) {
+          sendJson(res, 404, { error: "relief impossible", dim: dim });
+          return;
+        }
+        reliefCache.set(dim, {
+          rev: store.rev,
+          png: relief.buffer,
+          width: relief.width,
+          height: relief.height,
+        });
+        sendPng(res, relief.buffer, relief.width, relief.height);
+        return;
+      }
+
       if (parts[0] === "api" && parts[1] === "tile" && parts.length === 5) {
         const [, , dim, tx, tz] = parts;
         sendJson(res, 200, {
@@ -634,6 +695,7 @@ function main() {
       `[map] routes MipMap : POST /api/chunks-data, /api/players-data` +
         ` (${mipmapToken ? "jeton exige (?key=)" : "ouvertes, sans jeton"})`
     );
+    console.log(`[map] relief vu de dessus : GET /api/relief/<dim>`);
     console.log(`[map] chunks en memoire : ${app.store.chunks.size}`);
   });
 
