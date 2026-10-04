@@ -9,8 +9,8 @@ sendPlayers = true
 # verrouille avec MAP_MIPMAP_TOKEN, ajoute  ?key=<TOKEN>  a la fin des URL
 # (le plugin n'envoie aucun header d'authentification).
 [api]
-chunks = "http://151.240.30.8:10015/api/chunks-data"
-players = "http://151.240.30.8:10015/api/players-data"
+chunks = "http://151.240.30.10:10005/api/chunks-data"
+players = "http://151.240.30.10:10005/api/players-data"
 
 # Warning: modify only if you understand the consequences
 [mapLoading]

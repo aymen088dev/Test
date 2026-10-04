@@ -33,16 +33,16 @@ Le plugin crée `plugins/mipmap/config.toml` au premier lancement.
 sendPlayers = true
 
 [api]
-chunks  = "http://<IP_DU_MAPSERVER>:10015/api/chunks-data"
-players = "http://<IP_DU_MAPSERVER>:10015/api/players-data"
+chunks  = "http://<IP_DU_MAPSERVER>:10005/api/chunks-data"
+players = "http://<IP_DU_MAPSERVER>:10005/api/players-data"
 ```
 
 Si le mapserver est verrouillé avec `MAP_MIPMAP_TOKEN`, ajoute la clé dans
 l'URL (le plugin n'envoie **aucun header** d'authentification) :
 
 ```toml
-chunks  = "http://<IP>:10015/api/chunks-data?key=<TOKEN>"
-players = "http://<IP>:10015/api/players-data?key=<TOKEN>"
+chunks  = "http://<IP>:10005/api/chunks-data?key=<TOKEN>"
+players = "http://<IP>:10005/api/players-data?key=<TOKEN>"
 ```
 
 **Le plugin exige une réponse HTTP 200** : tout autre code est journalisé

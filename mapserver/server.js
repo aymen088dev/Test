@@ -885,7 +885,7 @@ function createApp(options = {}) {
 }
 
 function main() {
-  const port = Number(process.env.PORT || process.env.MAP_PORT || 10015);
+  const port = Number(process.env.PORT || process.env.MAP_PORT || 10005);
   const host = process.env.HOST || "0.0.0.0";
   const dataFile =
     process.env.MAP_DATA_FILE || path.join(__dirname, "data", "chunks.ndjson");

@@ -35,7 +35,7 @@ Aucune étape `npm install` : il n'y a **aucune dépendance**.
 
 Sur **Pterodactyl (egg Node.js)** : mets le dossier `mapserver/` à la racine de
 l'instance, commande de démarrage `node server.js`, variable `PORT` fixée par le
-panel (ici `10015`).
+panel (ici `10005`).
 
 ## Serveur Minecraft et mapserver sur des machines différentes
 
@@ -44,9 +44,9 @@ contrainte. Trois cas :
 
 | Situation | URL à mettre dans `config.toml` |
 |---|---|
-| Même instance Pterodactyl (mapserver lancé dans le même conteneur) | `http://127.0.0.1:10015/api/chunks-data` |
+| Même instance Pterodactyl (mapserver lancé dans le même conteneur) | `http://127.0.0.1:10005/api/chunks-data` |
 | Deux instances Pterodactyl **sur le même node** | `http://<IP_DU_NODE>:<PORT_ALLOCATION>/api/chunks-data` |
-| Mapserver ailleurs (VPS, PC perso, Docker…) | `http://<IP_PUBLIQUE>:10015/api/chunks-data` |
+| Mapserver ailleurs (VPS, PC perso, Docker…) | `http://<IP_PUBLIQUE>:10005/api/chunks-data` |
 
 ⚠️ **`127.0.0.1` ne marche que dans le même conteneur.** Deux serveurs
 Pterodactyl sont deux conteneurs séparés : depuis le serveur Minecraft,
@@ -63,7 +63,7 @@ Côté mapserver :
 Test depuis le serveur Minecraft (ou n'importe où) :
 
 ```bash
-curl http://<IP_DU_MAPSERVER>:10015/api/status
+curl http://<IP_DU_MAPSERVER>:10005/api/status
 ```
 
 Si ça répond, le plugin répondra aussi. Sinon c'est le réseau (IP, port,
@@ -73,7 +73,7 @@ firewall, allocation), pas le code.
 
 | Variable | Défaut | Rôle |
 |---|---|---|
-| `PORT` | `10015` | port d'écoute (`MAP_PORT` accepté aussi) |
+| `PORT` | `10005` | port d'écoute (`MAP_PORT` accepté aussi) |
 | `HOST` | `0.0.0.0` | adresse d'écoute |
 | `MAP_API_KEY` | *(vide)* | clé d'API exigée pour `POST /api/chunk` |
 | `MAP_MIPMAP_TOKEN` | *(vide)* | clé exigée pour les routes MipMap (`?key=`) |
@@ -146,16 +146,16 @@ Dans `plugins/mipmap/config.toml` :
 sendPlayers = true
 
 [api]
-chunks = "http://151.240.30.8:10015/api/chunks-data"
-players = "http://151.240.30.8:10015/api/players-data"
+chunks = "http://151.240.30.10:10005/api/chunks-data"
+players = "http://151.240.30.10:10005/api/players-data"
 ```
 
 Si `MAP_MIPMAP_TOKEN` est défini côté serveur, ajoute la clé dans l'URL
 (MipMap n'envoie aucun header d'authentification) :
 
 ```toml
-chunks = "http://<IP_DU_SERVEUR>:10015/api/chunks-data?key=<TOKEN>"
-players = "http://<IP_DU_SERVEUR>:10015/api/players-data?key=<TOKEN>"
+chunks = "http://<IP_DU_SERVEUR>:10005/api/chunks-data?key=<TOKEN>"
+players = "http://<IP_DU_SERVEUR>:10005/api/players-data?key=<TOKEN>"
 ```
 
 **Le plugin exige une réponse HTTP 200** : sinon il journalise
